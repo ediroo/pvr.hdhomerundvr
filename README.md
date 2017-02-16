@@ -16,7 +16,10 @@ Copyright (C)2017 Michael G. Brehm
 **CONFIGURE BASH ON UBUNTU ON WINDOWS**   
 Open "Bash on Ubuntu on Windows"   
 ```
-sudo apt-get install gcc g++ gcc-multilib g++-multilib
+sudo dpkg --add-architecture i386
+sudo apt-get update
+sudo apt-get install gcc g++ gcc-multilib g++-multilib libssl-dev libssl-dev:i386
+sudo apt-get install gcc-4.9 g++-4.9 gcc-4.9-multilib g++-4.9-multilib
 ```
    
 **BUILD**   

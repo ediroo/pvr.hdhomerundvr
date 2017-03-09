@@ -379,6 +379,11 @@ void enumerate_recordings(sqlite3* instance, enumerate_recordings_callback callb
 // Enumerates the available recording rules
 void enumerate_recordingrules(sqlite3* instance, enumerate_recordingrules_callback callback);
 
+// enumerate_sd_channelids
+//
+// Enumerates channels not marked as 'HD' in the lineups
+void enumerate_sd_channelids(sqlite3* instance, enumerate_channelids_callback callback);
+
 // enumerate_series_channelids
 //
 // Enumerates channels associated with a series in the database
@@ -443,6 +448,7 @@ void modify_recordingrule(sqlite3* instance, struct recordingrule const& recordi
 //
 // Opens a handle to the backend SQLite database
 sqlite3* open_database(char const* connstring, int flags);
+sqlite3* open_database(char const* connstring, int flags, bool initialize);
 
 // try_execute_non_query
 //

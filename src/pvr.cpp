@@ -35,6 +35,10 @@
 #include <type_traits>
 #include <vector>
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+
 #include <version.h>
 #include <xbmc_pvr_dll.h>
 
@@ -858,7 +862,20 @@ static void log_message(addoncallbacks::addon_log_t level, _args&&... args)
 	(void)unpack;
 
 	if(g_addon) g_addon->Log(level, stream.str().c_str());
-	if (level == addoncallbacks::addon_log_t::LOG_ERROR) fprintf(stderr, "ERROR: %s\r\n", stream.str().c_str());
+
+	// Write LOG_ERROR level messages to an appropriate secondary log mechanism
+	if(level == addoncallbacks::addon_log_t::LOG_ERROR) {
+
+#ifdef _WINDOWS
+		std::string message = "ERROR: " + stream.str() + "\r\n";
+		OutputDebugStringA(message.c_str());
+#elif __ANDROID__
+		__android_log_print(ANDROID_LOG_ERROR, VERSION_PRODUCTNAME_ANSI, "ERROR: %s\n", stream.str().c_str());
+#else
+		fprintf(stderr, "ERROR: %s\r\n", stream.str().c_str());
+#endif
+
+	}
 }
 
 // log_notice
@@ -883,7 +900,7 @@ unsigned long openssl_id_callback(void)
 // OpenSSL locking function callback
 void openssl_locking_callback(int mode, int n, char const* /*file*/, int /*line*/)
 {
-	if ((mode & CRYPTO_LOCK) == CRYPTO_LOCK) g_openssl_locks[n].lock();
+	if((mode & CRYPTO_LOCK) == CRYPTO_LOCK) g_openssl_locks[n].lock();
 	else g_openssl_locks[n].unlock();
 }
 
@@ -1678,7 +1695,7 @@ PVR_ERROR GetEPGForChannel(ADDON_HANDLE handle, PVR_CHANNEL const& channel, time
 
 int GetChannelGroupsAmount(void)
 {
-	return 2;		// "Favorite Channels" and "HD Channels"
+	return 3;		// "Favorite Channels", "HD Channels" and "SD Channels"
 }
 
 //---------------------------------------------------------------------------
@@ -1711,6 +1728,10 @@ PVR_ERROR GetChannelGroups(ADDON_HANDLE handle, bool radio)
 	snprintf(group.strGroupName, std::extent<decltype(group.strGroupName)>::value, "HD Channels");
 	g_pvr->TransferChannelGroup(handle, &group);
 
+	// SD Channels
+	snprintf(group.strGroupName, std::extent<decltype(group.strGroupName)>::value, "SD Channels");
+	g_pvr->TransferChannelGroup(handle, &group);
+
 	return PVR_ERROR::PVR_ERROR_NO_ERROR;
 }
 
@@ -1731,10 +1752,11 @@ PVR_ERROR GetChannelGroupMembers(ADDON_HANDLE handle, PVR_CHANNEL_GROUP const& g
 	if(handle == nullptr) return PVR_ERROR::PVR_ERROR_INVALID_PARAMETERS;
 
 	// Determine which group enumerator to use for the operation, there are only
-	// two to choose from: "Favorite Channels" and "HD Channels"
+	// three to choose from: "Favorite Channels", "HD Channels" and "SD Channels"
 	std::function<void(sqlite3*, enumerate_channelids_callback)> enumerator = nullptr;
 	if(strcmp(group.strGroupName, "Favorite Channels") == 0) enumerator = enumerate_favorite_channelids;
 	else if(strcmp(group.strGroupName, "HD Channels") == 0) enumerator = enumerate_hd_channelids;
+	else if(strcmp(group.strGroupName, "SD Channels") == 0) enumerator = enumerate_sd_channelids;
 
 	// If neither enumerator was selected, there isn't any work to do here
 	if(enumerator == nullptr) return PVR_ERROR::PVR_ERROR_NO_ERROR;

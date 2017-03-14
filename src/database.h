@@ -31,6 +31,8 @@
 #include <string>
 #include <vector>
 
+#include "scalar_condition.h"
+
 #pragma warning(push, 4)				// Enable maximum compiler warnings
 
 //---------------------------------------------------------------------------
@@ -66,7 +68,6 @@ struct channel {
 	char const*			inputformat;
 	char const*			iconurl;
 };
-
 
 // guideentry
 //
@@ -294,8 +295,8 @@ void delete_recordingrule(sqlite3* instance, unsigned int recordingruleid);
 // discover_devices
 //
 // Reloads the information about the available devices
-void discover_devices(sqlite3* instance);
-void discover_devices(sqlite3* instance, bool& changed);
+void discover_devices(sqlite3* instance, bool usebroadcast);
+void discover_devices(sqlite3* instance, bool usebroadcast, bool& changed);
 
 // discover_episodes
 //
@@ -312,8 +313,8 @@ void discover_guide_basic(sqlite3* instance, bool& changed);
 // discover_guide_extended
 //
 // Reloads the extended electronic program guide data
-void discover_guide_extended(sqlite3* instance);
-void discover_guide_extended(sqlite3* instance, bool& changed);
+void discover_guide_extended(sqlite3* instance, scalar_condition<bool> const& cancel);
+void discover_guide_extended(sqlite3* instance, scalar_condition<bool> const& cancel, bool& changed);
 
 // discover_lineups
 //

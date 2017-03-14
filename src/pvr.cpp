@@ -46,6 +46,7 @@
 #include "database.h"
 #include "livestream.h"
 #include "pvrcallbacks.h"
+#include "scalar_condition.h"
 #include "scheduler.h"
 #include "string_exception.h"
 
@@ -92,12 +93,12 @@ template<typename... _args> static void log_notice(_args&&... args);
 
 // Scheduled Tasks
 //
-static void discover_devices_task(void);
-static void discover_episodes_task(void);
-static void discover_guide_task(void);
-static void discover_lineups_task(void);
-static void discover_recordingrules_task(void);
-static void discover_recordings_task(void);
+static void discover_devices_task(scalar_condition<bool> const& cancel);
+static void discover_episodes_task(scalar_condition<bool> const& cancel);
+static void discover_guide_task(scalar_condition<bool> const& cancel);
+static void discover_lineups_task(scalar_condition<bool> const& cancel);
+static void discover_recordingrules_task(scalar_condition<bool> const& cancel);
+static void discover_recordings_task(scalar_condition<bool> const& cancel);
 
 //---------------------------------------------------------------------------
 // TYPE DECLARATIONS
@@ -159,6 +160,11 @@ struct addon_settings {
 	//
 	// Amount of time (seconds) after which an expired date/time rule is deleted
 	int delete_datetime_rules_after;
+
+	// use_broadcast_device_discovery
+	//
+	// Flag to discover devices via local network broadcast instead of HTTP
+	bool use_broadcast_device_discovery;
 
 	// discover_devices_interval
 	//
@@ -255,6 +261,7 @@ static addon_settings g_settings = {
 	false,					// pause_discovery_while_streaming
 	false,					// prepend_channel_numbers
 	86400,					// delete_datetime_rules_after			default = 1 day
+	false,					// use_broadcast_device_discovery
 	300, 					// discover_devices_interval;			default = 5 minutes
 	7200,					// discover_episodes_interval			default = 2 hours
 	1800,					// discover_guide_interval				default = 30 minutes
@@ -451,7 +458,7 @@ static int delete_expired_enum_to_seconds(int nvalue)
 // discover_devices_task
 //
 // Scheduled task implementation to discover the HDHomeRun devices
-static void discover_devices_task(void)
+static void discover_devices_task(scalar_condition<bool> const& cancel)
 {
 	bool		changed = false;			// Flag if the discovery data changed
 
@@ -461,6 +468,7 @@ static void discover_devices_task(void)
 	// Grab copies of the required setting(s) up front
 	std::unique_lock<std::mutex> settings_lock(g_settings_lock);
 	int discover_devices_interval = g_settings.discover_devices_interval;
+	bool use_broadcast_device_discovery = g_settings.use_broadcast_device_discovery;
 	settings_lock.unlock();
 
 	try {
@@ -469,7 +477,7 @@ static void discover_devices_task(void)
 		connectionpool::handle dbhandle(g_connpool);
 
 		// Discover the devices on the local network and check for changes
-		discover_devices(dbhandle, changed);
+		discover_devices(dbhandle, use_broadcast_device_discovery, changed);
 
 		if(changed) {
 
@@ -478,11 +486,11 @@ static void discover_devices_task(void)
 
 			log_notice(__func__, ": device discovery data changed -- execute lineup discovery now");
 			g_scheduler.remove(discover_lineups_task);
-			discover_lineups_task();
+			discover_lineups_task(cancel);
 
 			log_notice(__func__, ": device discovery data changed -- execute recording discovery now");
 			g_scheduler.remove(discover_recordings_task);
-			discover_recordings_task();
+			discover_recordings_task(cancel);
 		}
 	}
 
@@ -499,7 +507,7 @@ static void discover_devices_task(void)
 // discover_episodes_task
 //
 // Scheduled task implementation to discover the episode data associated with recording rules
-static void discover_episodes_task(void)
+static void discover_episodes_task(scalar_condition<bool> const& /*cancel*/)
 {
 	bool		changed = false;			// Flag if the discovery data changed
 
@@ -544,7 +552,7 @@ static void discover_episodes_task(void)
 // discover_guide_task
 //
 // Scheduled task implementation to discover the electronic program guide
-static void discover_guide_task(void)
+static void discover_guide_task(scalar_condition<bool> const& cancel)
 {
 	bool		changed = false;			// Flag if the discovery data changed
 
@@ -564,7 +572,7 @@ static void discover_guide_task(void)
 
 		// Discover the updated electronic program guide data from the backend service
 		if(guide_data_level == guide_data::basic) discover_guide_basic(dbhandle, changed);
-		else if(guide_data_level == guide_data::extended) discover_guide_extended(dbhandle, changed);
+		else if(guide_data_level == guide_data::extended) discover_guide_extended(dbhandle, cancel, changed);
 		else {
 
 			// If the guide_data_level setting is bad, default to using the basic guide data
@@ -597,7 +605,7 @@ static void discover_guide_task(void)
 // discover_lineups_task
 //
 // Scheduled task implementation to discover the channel lineups
-static void discover_lineups_task(void)
+static void discover_lineups_task(scalar_condition<bool> const& cancel)
 {
 	bool		changed = false;			// Flag if the discovery data changed
 
@@ -630,7 +638,7 @@ static void discover_lineups_task(void)
 			// if new channels were added they may be able to be populated in the guide immediately
 			log_notice(__func__, ": lineup discovery data changed -- execute electronic program guide discovery now");
 			g_scheduler.remove(discover_guide_task);
-			discover_guide_task();
+			discover_guide_task(cancel);
 		}
 	}
 
@@ -647,7 +655,7 @@ static void discover_lineups_task(void)
 // discover_recordingrules_task
 //
 // Scheduled task implementation to discover the recording rules and timers
-static void discover_recordingrules_task(void)
+static void discover_recordingrules_task(scalar_condition<bool> const& /*cancel*/)
 {
 	bool		changed = false;			// Flag if the discovery data changed
 
@@ -716,7 +724,7 @@ static void discover_recordingrules_task(void)
 // discover_recordings_task
 //
 // Scheduled task implementation to discover the storage recordings
-static void discover_recordings_task(void)
+static void discover_recordings_task(scalar_condition<bool> const& /*cancel*/)
 {
 	bool		changed = false;			// Flag if the discovery data changed
 
@@ -923,6 +931,7 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 	PVR_MENUHOOK			menuhook;			// For registering menu hooks
 	bool					bvalue = false;		// Setting value
 	int						nvalue = 0;			// Setting value
+	scalar_condition<bool>	cancel{false};		// Dummy cancellation flag for tasks
 
 	if((handle == nullptr) || (props == nullptr)) return ADDON_STATUS::ADDON_STATUS_PERMANENT_FAILURE;
 
@@ -931,7 +940,14 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 	g_epgmaxtime = pvrprops->iEpgMaxDays;
 
 	try {
-		
+
+#ifdef _WINDOWS
+		// On Windows, initialize winsock in case broadcast discovery is used; WSAStartup is
+		// reference-counted so if it's already been called this won't hurt anything
+		WSADATA wsaData;
+		WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
+
 		// Initialize libcurl using the standard default options
 		if(curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) throw string_exception("curl_global_init(CURL_GLOBAL_DEFAULT) failed");
 
@@ -963,6 +979,7 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 			if(g_addon->GetSetting("delete_datetime_rules_after", &nvalue)) g_settings.delete_datetime_rules_after = delete_expired_enum_to_seconds(nvalue);
 
 			// Load the discovery interval settings
+			if(g_addon->GetSetting("use_broadcast_device_discovery", &bvalue)) g_settings.use_broadcast_device_discovery = bvalue;
 			if(g_addon->GetSetting("discover_devices_interval", &nvalue)) g_settings.discover_devices_interval = interval_enum_to_seconds(nvalue);
 			if(g_addon->GetSetting("discover_lineups_interval", &nvalue)) g_settings.discover_lineups_interval = interval_enum_to_seconds(nvalue);
 			if(g_addon->GetSetting("discover_guide_interval", &nvalue)) g_settings.discover_guide_interval = interval_enum_to_seconds(nvalue);
@@ -1050,8 +1067,8 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 
 						log_notice(__func__, ": no channels detected in the database -- execute device and lineup discovery now");
 
-						discover_devices_task();				// Discover the initial set of devices
-						discover_lineups_task();				// Discover the initial set of channels
+						discover_devices_task(cancel);				// Discover the initial set of devices
+						discover_lineups_task(cancel);				// Discover the initial set of channels
 					}
 
 					else {
@@ -1141,6 +1158,10 @@ void ADDON_Destroy(void)
 	
 	// Clean up libcurl
 	curl_global_cleanup();
+
+#ifdef _WINDOWS
+	WSACleanup();			// Release winsock reference added in ADDON_Create
+#endif
 }
 
 //---------------------------------------------------------------------------
@@ -1254,6 +1275,22 @@ ADDON_STATUS ADDON_SetSetting(char const* name, void const* value)
 
 			g_settings.delete_datetime_rules_after = nvalue;
 			log_notice(__func__, ": setting delete_datetime_rules_after changed to ", nvalue, " seconds");
+		}
+	}
+
+	// use_broadcast_device_discovery
+	//
+	else if(strcmp(name, "use_broadcast_device_discovery") == 0) {
+
+		bool bvalue = *reinterpret_cast<bool const*>(value);
+		if(bvalue != g_settings.use_broadcast_device_discovery) {
+
+			g_settings.use_broadcast_device_discovery = bvalue;
+			log_notice(__func__, ": setting use_broadcast_device_discovery changed to ", (bvalue) ? "true" : "false", " -- schedule device discovery");
+
+			// Reschedule the device discovery task to run as soon as possible
+			g_scheduler.remove(discover_devices_task);
+			g_scheduler.add(now + std::chrono::seconds(1), discover_devices_task);
 		}
 	}
 
@@ -1520,6 +1557,9 @@ PVR_ERROR CallMenuHook(PVR_MENUHOOK const& menuhook, PVR_MENUHOOK_DATA const& it
 {
 	assert(g_pvr);
 
+	// Get the current time to reschedule tasks as requested
+	std::chrono::time_point<std::chrono::system_clock> now = std::chrono::system_clock::now();
+
 	// MENUHOOK_RECORD_DELETENORERECORD
 	//
 	if((menuhook.iHookId == MENUHOOK_RECORD_DELETENORERECORD) && (item.cat == PVR_MENUHOOK_RECORDING)) {
@@ -1551,45 +1591,45 @@ PVR_ERROR CallMenuHook(PVR_MENUHOOK const& menuhook, PVR_MENUHOOK_DATA const& it
 	//
 	else if(menuhook.iHookId == MENUHOOK_SETTING_TRIGGERDEVICEDISCOVERY) {
 
-		log_notice(__func__, ": manually triggering device discovery task");
+		log_notice(__func__, ": scheduling device discovery task to execute in 1 second");
 		g_scheduler.remove(discover_devices_task);
-		discover_devices_task();
+		g_scheduler.add(now + std::chrono::seconds(1), discover_devices_task);
 	}
 
 	// MENUHOOK_SETTING_TRIGGERLINEUPDISCOVERY
 	//
 	else if(menuhook.iHookId == MENUHOOK_SETTING_TRIGGERLINEUPDISCOVERY) {
 
-		log_notice(__func__, ": manually triggering lineup discovery task");
+		log_notice(__func__, ": scheduling lineup discovery task to execute in 1 second");
 		g_scheduler.remove(discover_lineups_task);
-		discover_lineups_task();
+		g_scheduler.add(now + std::chrono::seconds(1), discover_lineups_task);
 	}
 
 	// MENUHOOK_SETTING_TRIGGERGUIDEDISCOVERY
 	//
 	else if(menuhook.iHookId == MENUHOOK_SETTING_TRIGGERGUIDEDISCOVERY) {
 
-		log_notice(__func__, ": manually triggering guide discovery task");
+		log_notice(__func__, ": scheduling guide discovery task to execute in 1 second");
 		g_scheduler.remove(discover_guide_task);
-		discover_guide_task();
+		g_scheduler.add(now + std::chrono::seconds(1), discover_guide_task);
 	}
 
 	// MENUHOOK_SETTING_TRIGGERRECORDINGDISCOVERY
 	//
 	else if(menuhook.iHookId == MENUHOOK_SETTING_TRIGGERRECORDINGDISCOVERY) {
 
-		log_notice(__func__, ": manually triggering recording discovery task");
+		log_notice(__func__, ": scheduling recording discovery task to execute in 1 second");
 		g_scheduler.remove(discover_recordings_task);
-		discover_recordings_task();
+		g_scheduler.add(now + std::chrono::seconds(1), discover_recordings_task);
 	}
 
 	// MENUHOOK_SETTING_TRIGGERRECORDINGRULEDISCOVERY
 	//
 	else if(menuhook.iHookId == MENUHOOK_SETTING_TRIGGERRECORDINGRULEDISCOVERY) {
 
-		log_notice(__func__, ": manually triggering recording rule discovery task");
+		log_notice(__func__, ": scheduling recording rule discovery task to execute in 1 second");
 		g_scheduler.remove(discover_recordingrules_task);
-		discover_recordingrules_task();
+		g_scheduler.add(now + std::chrono::seconds(1), discover_recordingrules_task);
 	}
 
 	return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;

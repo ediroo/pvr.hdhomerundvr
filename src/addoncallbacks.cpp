@@ -39,6 +39,10 @@
 #define LIBXBMC_ADDON_MODULE "/library.xbmc.addon/libXBMC_addon-x86_64-linux.so"
 #elif defined(__i386__) && !defined(__ANDROID__)
 #define LIBXBMC_ADDON_MODULE "/library.xbmc.addon/libXBMC_addon-i486-linux.so"
+#elif defined(__arm__) && !defined(__ANDROID__)
+#define LIBXBMC_ADDON_MODULE "/library.xbmc.addon/libXBMC_addon-arm.so"
+#elif defined(__aarch64__) && !defined(__ANDROID__)
+#define LIBXBMC_ADDON_MODULE "/library.xbmc.addon/libXBMC_addon-aarch64.so"
 #elif defined(__ANDROID__) && defined(__arm__)
 #define LIBXBMC_ADDON_MODULE "/libXBMC_addon-arm.so"
 #elif defined(__ANDROID__) && (defined __aarch64__)
@@ -46,7 +50,7 @@
 #elif defined(__ANDROID__) && defined(__i386__)
 #define LIBXBMC_ADDON_MODULE "/libXBMC_addon-i486-linux.so"
 #else
-#error addoncallbacks.cpp -- unknown architecture -- only win32, linux-i686, linux-x86_64, android-armeabi-v7a, android-arm64-v8a and android-x86 are supported
+#error addoncallbacks.cpp -- unsupported architecture
 #endif
 
 // GetFunctionPointer (local)
@@ -343,6 +347,21 @@ bool addoncallbacks::GetSetting(char const* name, void* value) const
 }
 
 //-----------------------------------------------------------------------------
+// GetLocalizedString
+//
+// Retrieves a pointer to a localized string for this addon
+//
+// Arguments:
+//
+//	code		- Code of the localized resource string
+
+char const* addoncallbacks::GetLocalizedString(int code) const
+{
+	assert((XbmcGetLocalizedString) && (m_handle) && (m_callbacks));
+	return XbmcGetLocalizedString(m_handle, m_callbacks, code);
+}
+
+//-----------------------------------------------------------------------------
 // addoncallbacks::Log
 //
 // Writes an entry into the Kodi application log
@@ -375,6 +394,22 @@ void* addoncallbacks::OpenFile(char const* filename, unsigned int flags) const
 }
 
 //-----------------------------------------------------------------------------
+// addoncallbacks::QueueNotification
+//
+// Queues a notification message
+//
+// Arguments:
+//
+//	type			- Type of notification to be queued
+//	message			- Notification message
+
+void addoncallbacks::QueueNotification(queue_msg_t const type, char const* message) const
+{
+	assert((XbmcQueueNotification) && (m_handle) && (m_callbacks));
+	return XbmcQueueNotification(m_handle, m_callbacks, type, message);
+}
+
+//-----------------------------------------------------------------------------
 // addoncallbacks::ReadFile
 //
 // Reads data from an open file handle
@@ -385,7 +420,7 @@ void* addoncallbacks::OpenFile(char const* filename, unsigned int flags) const
 //	buffer			- Destination buffer to receive the data
 //	count			- Size of the destination buffer
 
-int addoncallbacks::ReadFile(void* handle, void* buffer, size_t count) const
+intptr_t addoncallbacks::ReadFile(void* handle, void* buffer, size_t count) const
 {
 	assert((XbmcReadFile) && (m_handle) && (m_callbacks));
 	return XbmcReadFile(m_handle, m_callbacks, handle, buffer, count);

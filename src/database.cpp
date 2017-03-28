@@ -29,7 +29,7 @@
 #include <string.h>
 #include <uuid/uuid.h>
 
-#include "discover.h"
+#include "hdhr.h"
 #include "sqlite_exception.h"
 #include "string_exception.h"
 
@@ -98,10 +98,13 @@ public:
 	{
 		if((data == nullptr) || (length == 0)) return 0;
 
+		// sqlite3_malloc accepts a signed integer value, not a size_t
+		if(length > static_cast<size_t>(std::numeric_limits<int>::max())) throw std::bad_alloc();
+
 		// If the buffer has not been allocated, allocate a single chunk
 		if(m_data == nullptr) {
 
-			m_data = reinterpret_cast<uint8_t*>(sqlite3_malloc(length));
+			m_data = reinterpret_cast<uint8_t*>(sqlite3_malloc(static_cast<int>(length)));
 			if(m_data == nullptr) throw std::bad_alloc();
 
 			m_size = length;
@@ -111,7 +114,10 @@ public:
 		// If the buffer has been exhausted, allocate another chunk
 		else {
 
-			uint8_t* newdata = reinterpret_cast<uint8_t*>(sqlite3_realloc(m_data, m_size + length));
+			// sqlite3_realloc accepts a signed integer value, not a size_t
+			if(m_size + length > static_cast<size_t>(std::numeric_limits<int>::max())) throw std::bad_alloc();
+
+			uint8_t* newdata = reinterpret_cast<uint8_t*>(sqlite3_realloc(m_data, static_cast<int>(m_size + length)));
 			if(newdata == nullptr) throw std::bad_alloc();
 
 			m_data = newdata;
@@ -158,7 +164,7 @@ private:
 };
 
 //
-// CONNECTIONPOOL IMPLEMENTATON
+// CONNECTIONPOOL IMPLEMENTATION
 //
 
 //---------------------------------------------------------------------------
@@ -285,8 +291,8 @@ void add_recordingrule(sqlite3* instance, struct recordingrule const& recordingr
 			result = sqlite3_bind_text(statement, 1, recordingrule.seriesid, -1, SQLITE_STATIC);
 			if((result == SQLITE_OK) && (recordingrule.recentonly)) result = sqlite3_bind_int(statement, 2, 1);
 			if((result == SQLITE_OK) && (recordingrule.channelid.value != 0)) result = sqlite3_bind_int(statement, 3, recordingrule.channelid.value);
-			if((result == SQLITE_OK) && (recordingrule.afteroriginalairdateonly != 0)) result = sqlite3_bind_int(statement, 4, recordingrule.afteroriginalairdateonly);
-			if((result == SQLITE_OK) && (recordingrule.datetimeonly != 0)) result = sqlite3_bind_int(statement, 5, recordingrule.datetimeonly);
+			if((result == SQLITE_OK) && (recordingrule.afteroriginalairdateonly != 0)) result = sqlite3_bind_int(statement, 4, static_cast<int>(recordingrule.afteroriginalairdateonly));
+			if((result == SQLITE_OK) && (recordingrule.datetimeonly != 0)) result = sqlite3_bind_int(statement, 5, static_cast<int>(recordingrule.datetimeonly));
 			if((result == SQLITE_OK) && (recordingrule.startpadding != 30)) result = sqlite3_bind_int(statement, 6, recordingrule.startpadding);
 			if((result == SQLITE_OK) && (recordingrule.endpadding != 30))  result = sqlite3_bind_int(statement, 7, recordingrule.endpadding);
 			if(result != SQLITE_OK) throw sqlite_exception(result);
@@ -636,7 +642,7 @@ void discover_devices_http(sqlite3* instance)
 		"case when json_type(discovery.value, '$.DeviceID') is not null then 'tuner' when json_type(discovery.value, '$.StorageID') is not null then 'storage' else 'unknown' end as type, "
 		"http_request(json_extract(discovery.value, '$.DiscoverURL'), null) as data "
 		"from json_each(http_request('http://ipv4.my.hdhomerun.com/discover')) as discovery "
-		"where data is not null");
+		"where data is not null and json_extract(data, '$.Legacy') is null");
 }
 
 //---------------------------------------------------------------------------
@@ -935,9 +941,9 @@ void discover_lineups(sqlite3* instance, bool& changed)
 
 	try {
 
-		// Discover the channel lineups for all available tuner devices
+		// Discover the channel lineups for all available tuner devices; watch for results that return 'null'
 		execute_non_query(instance, "insert into discover_lineup select deviceid, http_request(json_extract(device.data, '$.LineupURL')) "
-			"from device where device.type = 'tuner'");
+			"as json from device where device.type = 'tuner' and cast(json as text) <> 'null'");
 
 		// This requires a multi-step operation against the lineup table; start a transaction
 		execute_non_query(instance, "begin immediate transaction");
@@ -1256,6 +1262,50 @@ void enumerate_channelids(sqlite3* instance, enumerate_channelids_callback callb
 }
 
 //---------------------------------------------------------------------------
+// enumerate_channeltuners
+//
+// Enumerates the tuners that can tune a specific channel
+//
+// Arguments:
+//
+//	instance		- Database instance
+//	channelid		- channelid on which to find tuners
+//	callback		- Callback function
+
+void enumerate_channeltuners(sqlite3* instance, union channelid channelid, enumerate_channeltuners_callback callback)
+{
+	sqlite3_stmt*				statement;			// SQL statement to execute
+	int							result;				// Result from SQLite function
+	
+	if((instance == nullptr) || (callback == nullptr)) return;
+	
+	// tunerid
+	auto sql = "with recursive tuners(deviceid, tunerid) as "
+		"(select deviceid, json_extract(device.data, '$.TunerCount') - 1 from device where type = 'tuner' "
+		"union all select deviceid, tunerid - 1 from tuners where tunerid > 0) "
+		"select tuners.deviceid || '-' || tuners.tunerid as tunerid "
+		"from tuners inner join lineup using(deviceid), json_each(lineup.data) as lineupdata "
+		"where json_extract(lineupdata.value, '$.GuideNumber') = decode_channel_id(?1) order by tunerid desc";
+
+	result = sqlite3_prepare_v2(instance, sql, -1, &statement, nullptr);
+	if(result != SQLITE_OK) throw sqlite_exception(result, sqlite3_errmsg(instance));
+
+	try {
+
+		// Bind the query parameters
+		result = sqlite3_bind_int(statement, 1, channelid.value);
+		if(result != SQLITE_OK) throw sqlite_exception(result);
+
+		// Execute the query and iterate over all returned rows
+		while(sqlite3_step(statement) == SQLITE_ROW) callback(reinterpret_cast<char const*>(sqlite3_column_text(statement, 0)));
+	
+		sqlite3_finalize(statement);			// Finalize the SQLite statement
+	}
+
+	catch(...) { sqlite3_finalize(statement); throw; }
+}
+
+//---------------------------------------------------------------------------
 // enumerate_episode_channelids
 //
 // Enumerates all of the channel identifiers associated with any episodes
@@ -1457,7 +1507,7 @@ void enumerate_guideentries(sqlite3* instance, union channelid channelid, int ma
 
 		// Bind the query parameters
 		result = sqlite3_bind_int(statement, 1, channelid.value);
-		if(result == SQLITE_OK) result = sqlite3_bind_int(statement, 2, maxstarttime);
+		if(result == SQLITE_OK) result = sqlite3_bind_int(statement, 2, static_cast<int>(maxstarttime));
 		if(result != SQLITE_OK) throw sqlite_exception(result);
 
 		// Execute the query and iterate over all returned rows
@@ -1884,7 +1934,7 @@ std::string find_seriesid(sqlite3* instance, union channelid channelid, time_t t
 
 		// Bind the query parameters(s)
 		result = sqlite3_bind_int(statement, 1, channelid.value);
-		if(result == SQLITE_OK) result = sqlite3_bind_int(statement, 2, timestamp);
+		if(result == SQLITE_OK) result = sqlite3_bind_int(statement, 2, static_cast<int>(timestamp));
 		if(result != SQLITE_OK) throw sqlite_exception(result);
 		
 		// Execute the scalar query
@@ -2272,6 +2322,34 @@ int get_recordingrule_count(sqlite3* instance)
 }
 
 //---------------------------------------------------------------------------
+// get_season_number
+//
+// SQLite scalar function to read the season number from a string
+//
+// Arguments:
+//
+//	context		- SQLite context object
+//	argc		- Number of supplied arguments
+//	argv		- Argument values
+
+void get_season_number(sqlite3_context* context, int argc, sqlite3_value** argv)
+{
+	int				season = -1;				// Parsed season number
+	int				episode = -1;				// Parsed episode number
+
+	if((argc != 1) || (argv[0] == nullptr)) return sqlite3_result_error(context, "invalid argument", -1);
+	
+	// Null or zero-length input string results in -1
+	const char* str = reinterpret_cast<const char*>(sqlite3_value_text(argv[0]));
+	if((str == nullptr) || (*str == 0)) return sqlite3_result_int(context, -1);
+
+	if(sscanf(str, "S%dE%d", &season, &episode) == 2) return sqlite3_result_int(context, season);
+	else if(sscanf(str, "%d-%d", &season, &episode) == 2) return sqlite3_result_int(context, season);
+
+	return sqlite3_result_int(context, -1);
+}
+
+//---------------------------------------------------------------------------
 // get_stream_url
 //
 // Generates a stream URL for the specified channel
@@ -2365,31 +2443,63 @@ int get_timer_count(sqlite3* instance, int maxdays)
 }
 
 //---------------------------------------------------------------------------
-// get_season_number
+// get_tuner_stream_url
 //
-// SQLite scalar function to read the season number from a string
+// Generates a stream URL for the specified channel on the specified tuner
 //
 // Arguments:
 //
-//	context		- SQLite context object
-//	argc		- Number of supplied arguments
-//	argv		- Argument values
+//	instance		- Database instance
+//	tunerid			- Specified tuner id (XXXXXXXX-N format)
+//	channelid		- Channel for which to get the stream
 
-void get_season_number(sqlite3_context* context, int argc, sqlite3_value** argv)
+std::string get_tuner_stream_url(sqlite3* instance, char const* tunerid, union channelid channelid)
 {
-	int				season = -1;				// Parsed season number
-	int				episode = -1;				// Parsed episode number
+	sqlite3_stmt*				statement;				// Database query statement
+	std::string					streamurl;				// Generated stream URL
+	int							result;					// Result from SQLite function call
 
-	if((argc != 1) || (argv[0] == nullptr)) return sqlite3_result_error(context, "invalid argument", -1);
-	
-	// Null or zero-length input string results in -1
-	const char* str = reinterpret_cast<const char*>(sqlite3_value_text(argv[0]));
-	if((str == nullptr) || (*str == 0)) return sqlite3_result_int(context, -1);
+	if(instance == nullptr) throw std::invalid_argument("instance");
+	if((tunerid == nullptr) || (*tunerid == '\0')) throw std::invalid_argument("tunerid");
 
-	if(sscanf(str, "S%dE%d", &season, &episode) == 2) return sqlite3_result_int(context, season);
-	else if(sscanf(str, "%d-%d", &season, &episode) == 2) return sqlite3_result_int(context, season);
+	// Convert the provided tunerid (DDDDDDDD-T) into an std::string and find the hyphen
+	std::string tuneridstr(tunerid);
+	size_t hyphenpos = tuneridstr.find_first_of('-');
+	if(hyphenpos == std::string::npos) throw std::invalid_argument("tunerid");
 
-	return sqlite3_result_int(context, -1);
+	// Break up the tunerid into deviceid and tuner index based on the hyphen position
+	std::string deviceid = tuneridstr.substr(0, hyphenpos);
+	std::string tunerindex = tuneridstr.substr(hyphenpos + 1);
+	if((deviceid.length() == 0) || (tunerindex.length() != 1)) throw std::invalid_argument("tunerid");
+
+	// Prepare a scalar query to generate the URL by matching up the device id and channel against the lineup
+	auto sql = "select replace(json_extract(lineupdata.value, '$.URL'), 'auto', 'tuner' || ?1) as url "
+		"from lineup, json_each(lineup.data) as lineupdata where lineup.deviceid = ?2 "
+		"and json_extract(lineupdata.value, '$.GuideNumber') = decode_channel_id(?3)";
+
+	result = sqlite3_prepare_v2(instance, sql, -1, &statement, nullptr);
+	if(result != SQLITE_OK) throw sqlite_exception(result, sqlite3_errmsg(instance));
+
+	try {
+
+		// Bind the query parameters
+		result = sqlite3_bind_text(statement, 1, tunerindex.c_str(), -1, SQLITE_STATIC);
+		if(result == SQLITE_OK) result = sqlite3_bind_text(statement, 2, deviceid.c_str(), -1, SQLITE_STATIC);
+		if(result == SQLITE_OK) result = sqlite3_bind_int(statement, 3, channelid.value);
+		if(result != SQLITE_OK) throw sqlite_exception(result);
+		
+		// Execute the scalar query
+		result = sqlite3_step(statement);
+
+		// There should be a single SQLITE_ROW returned from the initial step()
+		if(result == SQLITE_ROW) streamurl.assign(reinterpret_cast<char const*>(sqlite3_column_text(statement, 0)));
+		else if(result != SQLITE_DONE) throw sqlite_exception(result, sqlite3_errmsg(instance));
+
+		sqlite3_finalize(statement);
+		return streamurl;
+	}
+
+	catch(...) { sqlite3_finalize(statement); throw; }
 }
 
 //---------------------------------------------------------------------------
@@ -2432,7 +2542,6 @@ void http_request(sqlite3_context* context, int argc, sqlite3_value** argv)
 	if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
 	if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<CURL_WRITEFUNCTION>(write_function));
 	if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(curl, CURLOPT_WRITEDATA, reinterpret_cast<void*>(&blob));
-	if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
 	if(curlresult == CURLE_OK) curlresult = curl_easy_perform(curl);
 	if(curlresult == CURLE_OK) curlresult = curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responsecode);
 	curl_easy_cleanup(curl);
@@ -2461,9 +2570,13 @@ void http_request(sqlite3_context* context, int argc, sqlite3_value** argv)
 		return sqlite3_free(reinterpret_cast<void*>(message));
 	}
 
-	// Send the resultant blob to SQLite as the result from this scalar function
+	// Watch for data that exceeds int::max, sqlite3_result_blob does not accept a size_t for the length
 	size_t cb = blob.size();
-	return (cb > 0) ? sqlite3_result_blob(context, blob.detach(), cb, sqlite3_free) : sqlite3_result_null(context);
+	if(cb > static_cast<size_t>(std::numeric_limits<int>::max())) 
+		return sqlite3_result_error(context, "blob data exceeds std::numeric_limits<int>::max() in length", -1);
+
+	// Send the resultant blob to SQLite as the result from this scalar function; detach from the sqlite_buffer
+	return (cb > 0) ? sqlite3_result_blob(context, blob.detach(), static_cast<int>(cb), sqlite3_free) : sqlite3_result_null(context);
 }
 
 //---------------------------------------------------------------------------
@@ -2513,7 +2626,7 @@ void modify_recordingrule(sqlite3* instance, struct recordingrule const& recordi
 			result = sqlite3_bind_int(statement, 1, recordingrule.recordingruleid);
 			if((result == SQLITE_OK) && (recordingrule.recentonly)) result = sqlite3_bind_int(statement, 2, 1);
 			if((result == SQLITE_OK) && (recordingrule.channelid.value != 0)) result = sqlite3_bind_int(statement, 3, recordingrule.channelid.value);
-			if((result == SQLITE_OK) && (recordingrule.afteroriginalairdateonly != 0)) result = sqlite3_bind_int(statement, 4, recordingrule.afteroriginalairdateonly);
+			if((result == SQLITE_OK) && (recordingrule.afteroriginalairdateonly != 0)) result = sqlite3_bind_int(statement, 4, static_cast<int>(recordingrule.afteroriginalairdateonly));
 			if((result == SQLITE_OK) && (recordingrule.startpadding != 30)) result = sqlite3_bind_int(statement, 5, recordingrule.startpadding);
 			if((result == SQLITE_OK) && (recordingrule.endpadding != 30))  result = sqlite3_bind_int(statement, 6, recordingrule.endpadding);
 			if(result != SQLITE_OK) throw sqlite_exception(result);

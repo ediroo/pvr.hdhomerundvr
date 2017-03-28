@@ -148,6 +148,11 @@ public:
 	// Gets the position within the specified file handle
 	int64_t GetFilePosition(void* handle) const;
 
+	// GetLocalizedString
+	//
+	// Retrieves a pointer to a localized string for this addon
+	char const* GetLocalizedString(int code) const;
+
 	// GetSetting
 	//
 	// Gets a setting for the current add-on
@@ -163,10 +168,15 @@ public:
 	// Open a handle to the specified file or URL
 	void* OpenFile(char const* filename, unsigned int flags) const;
 
+	// QueueNotification
+	//
+	// Queues a notification message
+	void QueueNotification(queue_msg_t const type, char const* message) const;
+
 	// ReadFile
 	//
 	// Reads data from an open file handle
-	int ReadFile(void* handle, void* buffer, size_t count) const;
+	intptr_t ReadFile(void* handle, void* buffer, size_t count) const;
 
 	// SeekFile
 	//

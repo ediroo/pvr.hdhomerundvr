@@ -22,25 +22,11 @@
 
 LOCAL_PATH := $(call my-dir)
 
-# libcrypto
-#
-include $(CLEAR_VARS)
-LOCAL_MODULE := libcrypto-prebuilt
-LOCAL_SRC_FILES := depends/libssl/android-$(TARGET_ARCH_ABI)/lib/libcrypto.a
-include $(PREBUILT_STATIC_LIBRARY)
-
 # libcurl
 #
 include $(CLEAR_VARS)
 LOCAL_MODULE := libcurl-prebuilt
-LOCAL_SRC_FILES := depends/libcurl/android-$(TARGET_ARCH_ABI)/lib/libcurl.a
-include $(PREBUILT_STATIC_LIBRARY)
-
-# libssl
-#
-include $(CLEAR_VARS)
-LOCAL_MODULE := libssl-prebuilt
-LOCAL_SRC_FILES := depends/libssl/android-$(TARGET_ARCH_ABI)/lib/libssl.a
+LOCAL_SRC_FILES := depends/libcurl-nossl/android-$(TARGET_ARCH_ABI)/lib/libcurl.a
 include $(PREBUILT_STATIC_LIBRARY)
 
 # libuuid
@@ -64,8 +50,7 @@ LOCAL_MODULE := hdhomerundvr
 
 LOCAL_C_INCLUDES += \
 	depends/kodi-addon-dev-kit/kodi \
-	depends/libcurl/android-$(TARGET_ARCH_ABI)/include/curl \
-	depends/libssl/android-$(TARGET_ARCH_ABI)/include \
+	depends/libcurl-nossl/android-$(TARGET_ARCH_ABI)/include/curl \
 	depends/libuuid/android-$(TARGET_ARCH_ABI)/include \
 	depends/libz/android-$(TARGET_ARCH_ABI)/include \
 	depends/libhdhomerun \
@@ -86,28 +71,31 @@ LOCAL_CPPFLAGS += \
 	-Wall \
 	-Wno-unknown-pragmas
 	
-# NOTE: The order is important here: libcurl->libssl->libcrypto->libz
 LOCAL_STATIC_LIBRARIES += \
 	libuuid-prebuilt \
 	libcurl-prebuilt \
-	libssl-prebuilt \
-	libcrypto-prebuilt \
 	libz-prebuilt
 
 LOCAL_LDLIBS += \
 	-llog
 
 LOCAL_SRC_FILES := \
+	depends/libhdhomerun/hdhomerun_channels.c \
+	depends/libhdhomerun/hdhomerun_channelscan.c \
+	depends/libhdhomerun/hdhomerun_control.c \
 	depends/libhdhomerun/hdhomerun_debug.c \
+	depends/libhdhomerun/hdhomerun_device.c \
+	depends/libhdhomerun/hdhomerun_device_selector.c \
 	depends/libhdhomerun/hdhomerun_discover.c \
 	depends/libhdhomerun/hdhomerun_os_posix.c \
 	depends/libhdhomerun/hdhomerun_pkt.c \
 	depends/libhdhomerun/hdhomerun_sock_posix.c \
+	depends/libhdhomerun/hdhomerun_video.c \
 	depends/sqlite/sqlite3.c \
 	src/addoncallbacks.cpp \
 	src/database.cpp \
 	src/dbextension.cpp \
-	src/discover.cpp \
+	src/hdhr.cpp \
 	src/livestream.cpp \
 	src/pvr.cpp \
 	src/pvrcallbacks.cpp \

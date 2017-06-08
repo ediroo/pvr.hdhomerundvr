@@ -80,6 +80,10 @@ msgctxt "#30112"
 msgid "Use season/episode number as title for recordings"
 msgstr ""
 
+msgctxt "#30113"
+msgid "Startup discovery task delay (seconds)"
+msgstr ""
+
 msgctxt "#30201"
 msgid "5 Minutes"
 msgstr ""
@@ -166,6 +170,10 @@ msgstr ""
 
 msgctxt "#30307"
 msgid "Trigger recording rule discovery"
+msgstr ""
+
+msgctxt "#30308"
+msgid "Reset discovery database"
 msgstr ""
 
 msgctxt "#30401"

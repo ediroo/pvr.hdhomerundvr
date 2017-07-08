@@ -30,6 +30,7 @@
 #include <mutex>
 #include <pthread.h>
 #include <string>
+#include <strings.h>
 #include <sstream>
 #include <vector>
 
@@ -882,6 +883,13 @@ static int interval_enum_to_seconds(int nvalue)
 		case 5: return 3600;		// 1 hour
 		case 6: return 7200;		// 2 hours
 		case 7: return 14400;		// 4 hours
+		
+		// 30 seconds and 1 minute were added after the fact, for compatibility
+		// with existing settings they were put at the end.  Local network
+		// discoveries can be executed more quickly if the user prefers that
+
+		case 8: return 30;			// 30 seconds
+		case 9: return 60;			// 1 minute
 	};
 
 	return 600;						// 10 minutes = default
@@ -2209,7 +2217,7 @@ int GetRecordingsAmount(bool deleted)
 
 PVR_ERROR GetRecordings(ADDON_HANDLE handle, bool deleted)
 {
-	assert(g_pvr);				
+	assert(g_addon && g_pvr);				
 
 	if(handle == nullptr) return PVR_ERROR::PVR_ERROR_INVALID_PARAMETERS;
 
@@ -2259,7 +2267,18 @@ PVR_ERROR GetRecordings(ADDON_HANDLE handle, bool deleted)
 			snprintf(recording.strStreamURL, std::extent<decltype(recording.strStreamURL)>::value, "%s", item.streamurl);
 
 			// strDirectory
-			if(item.directory != nullptr) snprintf(recording.strDirectory, std::extent<decltype(recording.strDirectory)>::value, "%s", item.directory);
+			if(item.directory != nullptr) {
+				
+				// Special case: "movie" --> #30402
+				if(strcasecmp(item.directory, "movie") == 0) 
+					snprintf(recording.strDirectory, std::extent<decltype(recording.strDirectory)>::value, "%s", g_addon->GetLocalizedString(30402));
+
+				// Special case: "sport" --> #30403
+				else if(strcasecmp(item.directory, "sport") == 0)
+					snprintf(recording.strDirectory, std::extent<decltype(recording.strDirectory)>::value, "%s", g_addon->GetLocalizedString(30403));
+
+				else snprintf(recording.strDirectory, std::extent<decltype(recording.strDirectory)>::value, "%s", item.directory);
+			}
 
 			// strPlot
 			if(item.plot != nullptr) snprintf(recording.strPlot, std::extent<decltype(recording.strPlot)>::value, "%s", item.plot);
@@ -3206,7 +3225,7 @@ long long PositionRecordedStream(void)
 }
 
 //---------------------------------------------------------------------------
-// PositionRecordedStream
+// LengthRecordedStream
 //
 // Gets the total length of the stream that's currently being read
 //

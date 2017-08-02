@@ -1,3 +1,18 @@
+v1.2.1 (2017.08.02)
+  - Add "Disable Channel", "Add to Favorite Channels" and "Remove from Favorite Channels" Client Actions to channel context menus
+  - Adapt to new backend discovery URLs (api.hdhomerun.com)
+  - Fall back to using a direct tuner stream for Live TV if a storage engine has not been discovered on the network
+  - Add "List discovered devices" PVR Client Specific setting
+
+v1.2.0 (2017.07.23)
+  - Update libhdhomerun library to version 2017.06.12
+  - Remove custom addon callback implementations in favor of the standard ones provided in Kodi source code
+  - Update MPEG-TS stream implementation to support Recorded TV as well as tuner-direct Live TV streams
+  - Detect and remove MPEG-TS SCTE PIM (0xC0) table when inserted before the PMT (0x02) table in the same PSI packet
+  - Add "DVR stream read operation timeout (milliseconds)" advanced option
+  - Add "DVR stream read operation minimum size" advanced option
+  - Add "DVR stream ring buffer size" advanced option
+
 v1.1.1 (2017.07.07)
   - Allow for 30-second and 1-minute local network discovery intervals (devices, lineups, recordings)
   - Adapt to backend recording attribute change; use DisplayGroupTitle instead of Title for recording folder names

@@ -39,15 +39,17 @@
 #include <sys/prctl.h>
 #endif
 
-#include <version.h>
+#include <xbmc_addon_dll.h>
 #include <xbmc_pvr_dll.h>
+#include <version.h>
 
-#include "addoncallbacks.h"
+#include <libXBMC_addon.h>
+#include <libKODI_guilib.h>
+#include <libXBMC_pvr.h>
+
 #include "database.h"
-#include "guicallbacks.h"
+#include "dvrstream.h"
 #include "hdhr.h"
-#include "livestream.h"
-#include "pvrcallbacks.h"
 #include "scalar_condition.h"
 #include "scheduler.h"
 #include "string_exception.h"
@@ -57,11 +59,6 @@
 //---------------------------------------------------------------------------
 // MACROS
 //---------------------------------------------------------------------------
-
-// LIVESTREAM_BUFFER_SIZE
-//
-// 4 megabytes is sufficient to store 2 seconds of content at 16Mb/s
-#define LIVESTREAM_BUFFER_SIZE	(4 MiB)
 
 // MENUHOOK_XXXXXX
 //
@@ -74,6 +71,10 @@
 #define MENUHOOK_SETTING_TRIGGERRECORDINGDISCOVERY		6
 #define MENUHOOK_SETTING_TRIGGERRECORDINGRULEDISCOVERY	7
 #define MENUHOOK_SETTING_RESETDATABASE					8
+#define MENUHOOK_CHANNEL_DISABLE						9
+#define MENUHOOK_CHANNEL_ADDFAVORITE					10
+#define MENUHOOK_CHANNEL_REMOVEFAVORITE					11
+#define MENUHOOK_SETTING_SHOWDEVICENAMES				12
 
 //---------------------------------------------------------------------------
 // FUNCTION PROTOTYPES
@@ -91,7 +92,7 @@ template<typename _result> static _result handle_stdexception(char const* functi
 template<typename... _args> static void log_debug(_args&&... args);
 template<typename... _args> static void log_error(_args&&... args);
 template<typename... _args> static void log_info(_args&&... args);
-template<typename... _args>	static void log_message(addoncallbacks::addon_log_t level, _args&&... args);
+template<typename... _args>	static void log_message(ADDON::addon_log_t level, _args&&... args);
 template<typename... _args> static void log_notice(_args&&... args);
 
 // Scheduled Tasks
@@ -200,6 +201,21 @@ struct addon_settings {
 	//
 	// Indicates the number of seconds to pause before initiating the startup discovery task
 	int startup_discovery_task_delay;
+
+	// stream_read_minimum_byte_count
+	//
+	// Indicates the minimum number of bytes to return from a stream read
+	int stream_read_minimum_byte_count;
+
+	// stream_read_timeout
+	//
+	// Indicates the stream read timeout value (milliseconds)
+	int stream_read_timeout;
+
+	// stream_ring_buffer_size
+	//
+	// Indicates the size of the stream ring buffer to allocate
+	int stream_ring_buffer_size;
 };
 
 //---------------------------------------------------------------------------
@@ -208,55 +224,44 @@ struct addon_settings {
 
 // g_addon
 //
-// Kodi add-on callback implementation
-static std::unique_ptr<addoncallbacks> g_addon;
+// Kodi add-on callbacks
+static std::unique_ptr<ADDON::CHelper_libXBMC_addon> g_addon;
 
 // g_capabilities (const)
 //
 // PVR implementation capability flags
 static const PVR_ADDON_CAPABILITIES g_capabilities = {
 
-	true,		// bSupportsEPG
-	true,		// bSupportsTV
-	false,		// bSupportsRadio
-	true,		// bSupportsRecordings
-	false,		// bSupportsRecordingsUndelete
-	true,		// bSupportsTimers
-	true,		// bSupportsChannelGroups
-	false,		// bSupportsChannelScan
-	false,		// bSupportsChannelSettings
-	true,		// bHandlesInputStream
-	false,		// bHandlesDemuxing
-	false,		// bSupportsRecordingPlayCount
-	false,		// bSupportsLastPlayedPosition
-	false,		// bSupportsRecordingEdl
-};
-
-// g_capabilities_directtune (const)
-//
-// PVR implementation capability flags when 'direct tuning' is enabled
-static const PVR_ADDON_CAPABILITIES g_capabilities_directtune = {
-
-	true,		// bSupportsEPG
-	true,		// bSupportsTV
-	false,		// bSupportsRadio
-	true,		// bSupportsRecordings
-	false,		// bSupportsRecordingsUndelete
-	true,		// bSupportsTimers
-	true,		// bSupportsChannelGroups
-	false,		// bSupportsChannelScan
-	false,		// bSupportsChannelSettings
-	false,		// bHandlesInputStream
-	false,		// bHandlesDemuxing
-	false,		// bSupportsRecordingPlayCount
-	false,		// bSupportsLastPlayedPosition
-	false,		// bSupportsRecordingEdl
+	true,			// bSupportsEPG
+	true,			// bSupportsTV
+	false,			// bSupportsRadio
+	true,			// bSupportsRecordings
+	false,			// bSupportsRecordingsUndelete
+	true,			// bSupportsTimers
+	true,			// bSupportsChannelGroups
+	false,			// bSupportsChannelScan
+	false,			// bSupportsChannelSettings
+	true,			// bHandlesInputStream
+	false,			// bHandlesDemuxing
+	false,			// bSupportsRecordingPlayCount
+	false,			// bSupportsLastPlayedPosition
+	false,			// bSupportsRecordingEdl
+	false,			// bSupportsRecordingsRename
+	false,			// bSupportsRecordingsLifetimeChange
+	false,			// bSupportsDescrambleInfo
+	0,				// iRecordingsLifetimesSize
+	{ { 0, "" } }	// recordingsLifetimeValues
 };
 
 // g_connpool
 //
 // Global SQLite database connection pool instance
 static std::shared_ptr<connectionpool> g_connpool;
+
+// g_dvrstream
+//
+// DVR stream buffer instance
+static std::unique_ptr<dvrstream> g_dvrstream;
 
 // g_epgmaxtime
 //
@@ -265,18 +270,13 @@ static int g_epgmaxtime = EPG_TIMEFRAME_UNLIMITED;
 
 // g_gui
 //
-// Kodi GUI library callback implementation
-static std::unique_ptr<guicallbacks> g_gui;
-
-// g_livestream
-//
-// Global live stream buffer instance
-static livestream g_livestream(LIVESTREAM_BUFFER_SIZE);
+// Kodi GUI library callbacks
+static std::unique_ptr<CHelper_libKODI_guilib> g_gui;
 
 // g_pvr
 //
-// Kodi PVR add-on callback implementation
-static std::unique_ptr<pvrcallbacks> g_pvr;
+// Kodi PVR add-on callbacks
+static std::unique_ptr<CHelper_libXBMC_pvr> g_pvr;
 
 // g_scheduler
 //
@@ -301,6 +301,9 @@ static addon_settings g_settings = {
 	7200,					// discover_recordingrules_interval		default = 2 hours
 	false,					// use_direct_tuning
 	3,						// startup_discovery_task_delay
+	(1 KiB),				// stream_read_minimum_byte_count
+	2500,					// stream_read_timeout
+	(4 MiB),				// stream_ring_buffer_size
 };
 
 // g_settings_lock
@@ -323,7 +326,7 @@ static const PVR_TIMER_TYPE g_timertypes[] ={
 
 		// iAttributes
 		PVR_TIMER_TYPE_IS_REPEATING | PVR_TIMER_TYPE_SUPPORTS_CHANNELS | PVR_TIMER_TYPE_SUPPORTS_TITLE_EPG_MATCH | PVR_TIMER_TYPE_SUPPORTS_RECORD_ONLY_NEW_EPISODES | 
-			PVR_TIMER_TYPE_SUPPORTS_START_END_MARGIN | PVR_TIMER_TYPE_FORBIDS_EPG_TAG_ON_CREATE,
+			PVR_TIMER_TYPE_SUPPORTS_START_END_MARGIN | PVR_TIMER_TYPE_FORBIDS_EPG_TAG_ON_CREATE | PVR_TIMER_TYPE_SUPPORTS_ANY_CHANNEL,
 
 		// strDescription
 		"Record Series Rule",
@@ -490,7 +493,7 @@ static int delete_expired_enum_to_seconds(int nvalue)
 	};
 
 	return -1;						// Never = default
-};
+}
 
 // discover_devices_task
 //
@@ -893,7 +896,7 @@ static int interval_enum_to_seconds(int nvalue)
 	};
 
 	return 600;						// 10 minutes = default
-};
+}
 	
 // log_debug
 //
@@ -901,7 +904,7 @@ static int interval_enum_to_seconds(int nvalue)
 template<typename... _args>
 static void log_debug(_args&&... args)
 {
-	log_message(addoncallbacks::addon_log_t::LOG_DEBUG, std::forward<_args>(args)...);
+	log_message(ADDON::addon_log_t::LOG_DEBUG, std::forward<_args>(args)...);
 }
 
 // log_error
@@ -910,7 +913,7 @@ static void log_debug(_args&&... args)
 template<typename... _args>
 static void log_error(_args&&... args)
 {
-	log_message(addoncallbacks::addon_log_t::LOG_ERROR, std::forward<_args>(args)...);
+	log_message(ADDON::addon_log_t::LOG_ERROR, std::forward<_args>(args)...);
 }
 
 // log_info
@@ -919,14 +922,14 @@ static void log_error(_args&&... args)
 template<typename... _args>
 static void log_info(_args&&... args)
 {
-	log_message(addoncallbacks::addon_log_t::LOG_INFO, std::forward<_args>(args)...);
+	log_message(ADDON::addon_log_t::LOG_INFO, std::forward<_args>(args)...);
 }
 
 // log_message
 //
 // Variadic method of writing an entry into the Kodi application log
 template<typename... _args>
-static void log_message(addoncallbacks::addon_log_t level, _args&&... args)
+static void log_message(ADDON::addon_log_t level, _args&&... args)
 {
 	std::ostringstream stream;
 	int unpack[] = {0, ( static_cast<void>(stream << args), 0 ) ... };
@@ -935,7 +938,7 @@ static void log_message(addoncallbacks::addon_log_t level, _args&&... args)
 	if(g_addon) g_addon->Log(level, stream.str().c_str());
 
 	// Write LOG_ERROR level messages to an appropriate secondary log mechanism
-	if(level == addoncallbacks::addon_log_t::LOG_ERROR) {
+	if(level == ADDON::addon_log_t::LOG_ERROR) {
 
 #ifdef _WINDOWS
 		std::string message = "ERROR: " + stream.str() + "\r\n";
@@ -955,7 +958,42 @@ static void log_message(addoncallbacks::addon_log_t level, _args&&... args)
 template<typename... _args>
 static void log_notice(_args&&... args)
 {
-	log_message(addoncallbacks::addon_log_t::LOG_NOTICE, std::forward<_args>(args)...);
+	log_message(ADDON::addon_log_t::LOG_NOTICE, std::forward<_args>(args)...);
+}
+
+// mincount_enum_to_bytes
+//
+// Converts the minimum read count enumeration values into a number of bytes
+static int mincount_enum_to_bytes(int nvalue)
+{	
+	switch(nvalue) {
+
+		case 0: return 0;			// None
+		case 1: return (1 KiB);		// 1 Kilobyte
+		case 2: return (2 KiB);		// 2 Kilobytes
+		case 3: return (4 KiB);		// 4 Kilobytes
+		case 4: return (8 KiB);		// 8 Kilobytes
+		case 5: return (16 KiB);	// 16 Kilobytes
+	};
+
+	return (1 KiB);					// 1 Kilobyte = default
+}
+
+// ringbuffersize_enum_to_bytes
+//
+// Converts the ring buffer size enumeration values into a number of bytes
+static int ringbuffersize_enum_to_bytes(int nvalue)
+{	
+	switch(nvalue) {
+
+		case 0: return (1 MiB);		// 1 Megabyte
+		case 1: return (2 MiB);		// 2 Megabytes
+		case 2: return (4 MiB);		// 4 Megabytes
+		case 3: return (8 MiB);		// 8 Megabytes
+		case 4: return (16 MiB);	// 16 Megabytes
+	};
+
+	return (4 MiB);					// 4 Megabytes = default
 }
 
 //---------------------------------------------------------------------------
@@ -1002,8 +1040,9 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 		// Initialize libcurl using the standard default options
 		if(curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) throw string_exception("curl_global_init(CURL_GLOBAL_DEFAULT) failed");
 
-		// Create the global addoncallbacks instance
-		g_addon.reset(new addoncallbacks(handle));
+		// Create the global addon callbacks instance
+		g_addon.reset(new ADDON::CHelper_libXBMC_addon());
+		if(!g_addon->RegisterMe(handle)) throw string_exception("Failed to register addon handle (CHelper_libXBMC_addon::RegisterMe)");
 
 		// Throw a banner out to the Kodi log indicating that the add-on is being loaded
 		log_notice(VERSION_PRODUCTNAME_ANSI, " v", VERSION_VERSION3_ANSI, " loading");
@@ -1036,14 +1075,19 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 			// Load the advanced settings
 			if(g_addon->GetSetting("use_direct_tuning", &bvalue)) g_settings.use_direct_tuning = bvalue;
 			if(g_addon->GetSetting("startup_discovery_task_delay", &nvalue)) g_settings.startup_discovery_task_delay = nvalue;
+			if(g_addon->GetSetting("stream_read_minimum_byte_count", &nvalue)) g_settings.stream_read_minimum_byte_count = mincount_enum_to_bytes(nvalue);
+			if(g_addon->GetSetting("stream_read_timeout", &nvalue)) g_settings.stream_read_timeout = nvalue;
+			if(g_addon->GetSetting("stream_ring_buffer_size", &nvalue)) g_settings.stream_ring_buffer_size = ringbuffersize_enum_to_bytes(nvalue);
 
 			// Create the global guicallbacks instance
-			g_gui.reset(new guicallbacks(handle));
+			g_gui.reset(new CHelper_libKODI_guilib());
+			if(!g_gui->RegisterMe(handle)) throw string_exception("Failed to register gui addon handle (CHelper_libKODI_guilib::RegisterMe)");
 
 			try {
 
 				// Create the global pvrcallbacks instance
-				g_pvr.reset(new pvrcallbacks(handle));
+				g_pvr.reset(new CHelper_libXBMC_pvr());
+				if(!g_pvr->RegisterMe(handle)) throw string_exception("Failed to register pvr addon handle (CHelper_libXBMC_pvr::RegisterMe)");
 		
 				try {
 
@@ -1061,6 +1105,14 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 					menuhook.iHookId = MENUHOOK_RECORD_DELETERERECORD;
 					menuhook.iLocalizedStringId = 30302;
 					menuhook.category = PVR_MENUHOOK_RECORDING;
+					g_pvr->AddMenuHook(&menuhook);
+
+					// MENUHOOK_SETTING_SHOWDEVICENAMES
+					//
+					memset(&menuhook, 0, sizeof(PVR_MENUHOOK));
+					menuhook.iHookId = MENUHOOK_SETTING_SHOWDEVICENAMES;
+					menuhook.iLocalizedStringId = 30312;
+					menuhook.category = PVR_MENUHOOK_SETTING;
 					g_pvr->AddMenuHook(&menuhook);
 
 					// MENUHOOK_SETTING_TRIGGERDEVICEDISCOVERY
@@ -1111,6 +1163,30 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 					menuhook.category = PVR_MENUHOOK_SETTING;
 					g_pvr->AddMenuHook(&menuhook);
 
+					// MENUHOOK_CHANNEL_DISABLE
+					//
+					memset(&menuhook, 0, sizeof(PVR_MENUHOOK));
+					menuhook.iHookId = MENUHOOK_CHANNEL_DISABLE;
+					menuhook.iLocalizedStringId = 30309;
+					menuhook.category = PVR_MENUHOOK_CHANNEL;
+					g_pvr->AddMenuHook(&menuhook);
+
+					// MENUHOOK_CHANNEL_ADDFAVORITE
+					//
+					memset(&menuhook, 0, sizeof(PVR_MENUHOOK));
+					menuhook.iHookId = MENUHOOK_CHANNEL_ADDFAVORITE;
+					menuhook.iLocalizedStringId = 30310;
+					menuhook.category = PVR_MENUHOOK_CHANNEL;
+					g_pvr->AddMenuHook(&menuhook);
+
+					// MENUHOOK_CHANNEL_REMOVEFAVORITE
+					//
+					memset(&menuhook, 0, sizeof(PVR_MENUHOOK));
+					menuhook.iHookId = MENUHOOK_CHANNEL_REMOVEFAVORITE;
+					menuhook.iLocalizedStringId = 30311;
+					menuhook.category = PVR_MENUHOOK_CHANNEL;
+					g_pvr->AddMenuHook(&menuhook);
+
 					// Create the global database connection pool instance, the file name is based on the versionb
 					std::string databasefile = "file:///" + std::string(pvrprops->strUserPath) + "/hdhomerundvr-v" + VERSION_VERSION2_ANSI + ".db";
 					g_connpool = std::make_shared<connectionpool>(databasefile.c_str(), SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_URI);
@@ -1147,18 +1223,18 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 					catch(...) { g_connpool.reset(); throw; }
 				}
 			
-				// Clean up the pvrcallbacks instance on exception
-				catch(...) { g_pvr.reset(nullptr); throw; }
+				// Clean up the pvr callbacks instance on exception
+				catch(...) { g_pvr.reset(); throw; }
 			}
 			
-			// Clean up the guicallbacks instance on exception
-			catch(...) { g_gui.reset(nullptr); throw; }
+			// Clean up the gui callbacks instance on exception
+			catch(...) { g_gui.reset(); throw; }
 		}
 
-		// Clean up the addoncallbacks on exception; but log the error first -- once the callbacks
+		// Clean up the addon callbacks on exception; but log the error first -- once the callbacks
 		// are destroyed so is the ability to write to the Kodi log file
-		catch(std::exception& ex) { handle_stdexception(__func__, ex); g_addon.reset(nullptr); throw; }
-		catch(...) { handle_generalexception(__func__); g_addon.reset(nullptr); throw; }
+		catch(std::exception& ex) { handle_stdexception(__func__, ex); g_addon.reset(); throw; }
+		catch(...) { handle_generalexception(__func__); g_addon.reset(); throw; }
 	}
 
 	// Anything that escapes above can't be logged at this point, just return ADDON_STATUS_PERMANENT_FAILURE
@@ -1168,28 +1244,6 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 	log_notice(VERSION_PRODUCTNAME_ANSI, " v", VERSION_VERSION3_ANSI, " loaded");
 
 	return ADDON_STATUS::ADDON_STATUS_OK;
-}
-
-//---------------------------------------------------------------------------
-// ADDON_Stop
-//
-// Instructs the addon to stop all activities
-//
-// Arguments:
-//
-//	NONE
-
-void ADDON_Stop(void)
-{
-	// Throw a message out to the Kodi log indicating that the add-on is being stopped
-	log_notice(VERSION_PRODUCTNAME_ANSI, " v", VERSION_VERSION3_ANSI, " stopping");
-
-	g_livestream.stop();			// Stop the live stream
-	g_scheduler.stop();				// Stop the task scheduler
-	g_scheduler.clear();			// Clear all scheduled tasks
-
-	// Throw a message out to the Kodi log indicating that the add-on has been stopped
-	log_notice(VERSION_PRODUCTNAME_ANSI, " v", VERSION_VERSION3_ANSI, " stopped");
 }
 
 //---------------------------------------------------------------------------
@@ -1206,10 +1260,9 @@ void ADDON_Destroy(void)
 	// Throw a message out to the Kodi log indicating that the add-on is being unloaded
 	log_notice(VERSION_PRODUCTNAME_ANSI, " v", VERSION_VERSION3_ANSI, " unloading");
 
-	// Stop any executing live stream data transfer as well as the task scheduler
-	g_livestream.stop();
-	g_scheduler.stop();
-	g_scheduler.clear();
+	g_dvrstream.reset();					// Destroy any active stream instance
+	g_scheduler.stop();						// Stop the task scheduler
+	g_scheduler.clear();					// Clear all tasks from the scheduler
 
 	// Check for more than just the global connection pool reference during shutdown,
 	// there shouldn't still be any active callbacks running during ADDON_Destroy
@@ -1218,12 +1271,12 @@ void ADDON_Destroy(void)
 	g_connpool.reset();
 
 	// Destroy the PVR and GUI callback instances
-	g_pvr.reset(nullptr);
-	g_gui.reset(nullptr);
+	g_pvr.reset();
+	g_gui.reset();
 
 	// Send a notice out to the Kodi log as late as possible and destroy the addon callbacks
 	log_notice(VERSION_PRODUCTNAME_ANSI, " v", VERSION_VERSION3_ANSI, " unloaded");
-	g_addon.reset(nullptr);
+	g_addon.reset();
 
 	// Clean up libcurl
 	curl_global_cleanup();
@@ -1245,34 +1298,6 @@ void ADDON_Destroy(void)
 ADDON_STATUS ADDON_GetStatus(void)
 {
 	return ADDON_STATUS::ADDON_STATUS_OK;
-}
-
-//---------------------------------------------------------------------------
-// ADDON_HasSettings
-//
-// Indicates if the Kodi addon has settings or not
-//
-// Arguments:
-//
-//	NONE
-
-bool ADDON_HasSettings(void)
-{
-	return true;
-}
-
-//---------------------------------------------------------------------------
-// ADDON_GetSettings
-//
-// Acquires the information about the Kodi addon settings
-//
-// Arguments:
-//
-//	settings		- Structure to receive the addon settings
-
-unsigned int ADDON_GetSettings(ADDON_StructSetting*** /*settings*/)
-{
-	return 0;
 }
 
 //---------------------------------------------------------------------------
@@ -1453,9 +1478,8 @@ ADDON_STATUS ADDON_SetSetting(char const* name, void const* value)
 		bool bvalue = *reinterpret_cast<bool const*>(value);
 		if(bvalue != g_settings.use_direct_tuning) {
 
-			// This setting is only read during ADDON_Create(); notify the user to restart Kodi
-			g_addon->QueueNotification(addoncallbacks::queue_msg_t::QUEUE_INFO, g_addon->GetLocalizedString(30401));
-			log_notice(__func__, ": setting use_direct_tuning changed to ", (bvalue) ? "true" : "false", " -- restart required");
+			g_settings.use_direct_tuning = bvalue;
+			log_notice(__func__, ": setting use_direct_tuning changed to ", (bvalue) ? "true" : "false");
 		}
 	}
 
@@ -1471,81 +1495,48 @@ ADDON_STATUS ADDON_SetSetting(char const* name, void const* value)
 		}
 	}
 
+	// stream_read_minimum_byte_count
+	//
+	else if(strcmp(name, "stream_read_minimum_byte_count") == 0) {
+
+		int nvalue = mincount_enum_to_bytes(*reinterpret_cast<int const*>(value));
+		if(nvalue != g_settings.stream_read_minimum_byte_count) {
+
+			g_settings.stream_read_minimum_byte_count = nvalue;
+			log_notice(__func__, ": setting stream_read_minimum_byte_count changed to ", nvalue, " bytes");
+		}
+	}
+
+	// stream_read_timeout
+	//
+	else if(strcmp(name, "stream_read_timeout") == 0) {
+
+		int nvalue = *reinterpret_cast<int const*>(value);
+		if(nvalue != g_settings.stream_read_timeout) {
+
+			g_settings.stream_read_timeout = nvalue;
+			log_notice(__func__, ": setting stream_read_timeout changed to ", nvalue, " milliseconds");
+		}
+	}
+
+	// stream_ring_buffer_size
+	//
+	else if(strcmp(name, "stream_ring_buffer_size") == 0) {
+
+		int nvalue = ringbuffersize_enum_to_bytes(*reinterpret_cast<int const*>(value));
+		if(nvalue != g_settings.stream_ring_buffer_size) {
+
+			g_settings.stream_ring_buffer_size = nvalue;
+			log_notice(__func__, ": setting stream_ring_buffer_size changed to ", nvalue, " bytes");
+		}
+	}
+
 	return ADDON_STATUS_OK;
-}
-
-//---------------------------------------------------------------------------
-// ADDON_FreeSettings
-//
-// Releases settings allocated by ADDON_GetSettings
-//
-// Arguments:
-//
-//	NONE
-
-void ADDON_FreeSettings(void)
-{
 }
 
 //---------------------------------------------------------------------------
 // KODI PVR ADDON ENTRY POINTS
 //---------------------------------------------------------------------------
-
-//---------------------------------------------------------------------------
-// GetPVRAPIVersion
-//
-// Get the XBMC_PVR_API_VERSION that was used to compile this add-on
-//
-// Arguments:
-//
-//	NONE
-
-char const* GetPVRAPIVersion(void)
-{
-	return XBMC_PVR_API_VERSION;
-}
-
-//---------------------------------------------------------------------------
-// GetMininumPVRAPIVersion
-//
-// Get the XBMC_PVR_MIN_API_VERSION that was used to compile this add-on
-//
-// Arguments:
-//
-//	NONE
-
-char const* GetMininumPVRAPIVersion(void)
-{
-	return XBMC_PVR_MIN_API_VERSION;
-}
-
-//---------------------------------------------------------------------------
-// GetGUIAPIVersion
-//
-// Get the KODI_GUILIB_API_VERSION that was used to compile this add-on
-//
-// Arguments:
-//
-//	NONE
-
-char const* GetGUIAPIVersion(void)
-{
-	return KODI_GUILIB_API_VERSION;
-}
-
-//---------------------------------------------------------------------------
-// GetMininumGUIAPIVersion
-//
-// Get the KODI_GUILIB_MIN_API_VERSION that was used to compile this add-on
-//
-// Arguments:
-//
-//	NONE
-
-char const* GetMininumGUIAPIVersion(void)
-{
-	return KODI_GUILIB_MIN_API_VERSION;
-}
 
 //---------------------------------------------------------------------------
 // GetAddonCapabilities
@@ -1560,10 +1551,7 @@ PVR_ERROR GetAddonCapabilities(PVR_ADDON_CAPABILITIES *capabilities)
 {
 	if(capabilities == nullptr) return PVR_ERROR::PVR_ERROR_INVALID_PARAMETERS;
 
-	// g_settings.use_direct_tuning does not require synchronization
-	if(g_settings.use_direct_tuning) *capabilities = g_capabilities_directtune;
-	else *capabilities = g_capabilities;
-	
+	*capabilities = g_capabilities;
 	return PVR_ERROR::PVR_ERROR_NO_ERROR;
 }
 
@@ -1674,6 +1662,28 @@ PVR_ERROR CallMenuHook(PVR_MENUHOOK const& menuhook, PVR_MENUHOOK_DATA const& it
 		catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
 
 		g_pvr->TriggerRecordingUpdate();
+		return PVR_ERROR::PVR_ERROR_NO_ERROR;
+	}
+
+	// MENUHOOK_SETTING_SHOWDEVICENAMES
+	//
+	else if(menuhook.iHookId == MENUHOOK_SETTING_SHOWDEVICENAMES) {
+
+		try {
+
+			// Enumerate all of the device names in the database and build out the text string
+			std::string names;
+			enumerate_device_names(connectionpool::handle(g_connpool), [&](struct device_name const& device_name) -> void { 
+
+				names.append(std::string(device_name.name) + "\r\n");
+			});
+
+			g_gui->Dialog_TextViewer("Discovered Devices", names.c_str());
+		}
+
+		catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
+		catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
+		
 		return PVR_ERROR::PVR_ERROR_NO_ERROR;
 	}
 
@@ -1789,6 +1799,75 @@ PVR_ERROR CallMenuHook(PVR_MENUHOOK const& menuhook, PVR_MENUHOOK_DATA const& it
 		catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
 		catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
 		
+		return PVR_ERROR::PVR_ERROR_NO_ERROR;
+	}
+
+	// MENUHOOK_CHANNEL_DISABLE
+	//
+	else if((menuhook.iHookId == MENUHOOK_CHANNEL_DISABLE) && (item.cat == PVR_MENUHOOK_CAT::PVR_MENUHOOK_CHANNEL)) {
+
+		try { 
+			
+			union channelid channelid;
+			channelid.value = item.data.channel.iUniqueId;
+
+			// Set the channel visibility to disabled (red x) and kick off a lineup discovery task
+			set_channel_visibility(connectionpool::handle(g_connpool), channelid, channel_visibility::disabled);
+		
+			log_notice(__func__, ": channel ", item.data.channel.strChannelName, " disabled; scheduling lineup discovery task");
+			g_scheduler.remove(discover_lineups_task);
+			g_scheduler.add(now, discover_lineups_task);
+		}
+
+		catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
+		catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
+
+		return PVR_ERROR::PVR_ERROR_NO_ERROR;
+	}
+
+	// MENUHOOK_CHANNEL_ADDFAVORITE
+	//
+	else if((menuhook.iHookId == MENUHOOK_CHANNEL_ADDFAVORITE) && (item.cat == PVR_MENUHOOK_CAT::PVR_MENUHOOK_CHANNEL)) {
+
+		try { 
+			
+			union channelid channelid;
+			channelid.value = item.data.channel.iUniqueId;
+
+			// Set the channel visibility to favorite (yellow star) and kick off a lineup discovery task
+			set_channel_visibility(connectionpool::handle(g_connpool), channelid, channel_visibility::favorite);
+		
+			log_notice(__func__, ": channel ", item.data.channel.strChannelName, " added as favorite; scheduling lineup discovery task");
+			g_scheduler.remove(discover_lineups_task);
+			g_scheduler.add(now, discover_lineups_task);
+		}
+
+		catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
+		catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
+
+		return PVR_ERROR::PVR_ERROR_NO_ERROR;
+	}
+
+	// MENUHOOK_CHANNEL_REMOVEFAVORITE
+	//
+	else if((menuhook.iHookId == MENUHOOK_CHANNEL_REMOVEFAVORITE) && (item.cat == PVR_MENUHOOK_CAT::PVR_MENUHOOK_CHANNEL)) {
+
+		try { 
+			
+			union channelid channelid;
+			channelid.value = item.data.channel.iUniqueId;
+
+			// Set the channel visibility to favorite (gray star) and kick off a lineup discovery task
+			set_channel_visibility(connectionpool::handle(g_connpool), channelid, channel_visibility::enabled);
+		
+			log_notice(__func__, ": channel ", item.data.channel.strChannelName, " removed from favorites; scheduling lineup discovery task");
+			g_scheduler.remove(discover_lineups_task);
+			g_scheduler.add(now, discover_lineups_task);
+		}
+
+		catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
+		catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
+
 		return PVR_ERROR::PVR_ERROR_NO_ERROR;
 	}
 
@@ -2088,15 +2167,7 @@ PVR_ERROR GetChannels(ADDON_HANDLE handle, bool radio)
 			if(item.channelname != nullptr) snprintf(channel.strChannelName, std::extent<decltype(channel.strChannelName)>::value, "%s", item.channelname);
 
 			// strInputFormat
-			//
-			// Only set if 'direct tuning' is disabled
-			if(!settings.use_direct_tuning) snprintf(channel.strInputFormat, std::extent<decltype(channel.strInputFormat)>::value, "video/mp2t");
-
-			// strStreamURL
-			//
-			// Only set if 'direct tuning' is enabled, this activates a hack in Kodi that will call GetLiveStreamURL
-			// to dynamically retrieve the URL for a live TV stream (may disappear in future Kodi releases)
-			if(settings.use_direct_tuning) snprintf(channel.strStreamURL, std::extent<decltype(channel.strStreamURL)>::value, "pvr://stream/%u", item.channelid.value);
+			snprintf(channel.strInputFormat, std::extent<decltype(channel.strInputFormat)>::value, "video/mp2t");
 
 			// strIconPath
 			if(item.iconurl != nullptr) snprintf(channel.strIconPath, std::extent<decltype(channel.strIconPath)>::value, "%s", item.iconurl);
@@ -2217,7 +2288,7 @@ int GetRecordingsAmount(bool deleted)
 
 PVR_ERROR GetRecordings(ADDON_HANDLE handle, bool deleted)
 {
-	assert(g_addon && g_pvr);				
+	assert(g_pvr);				
 
 	if(handle == nullptr) return PVR_ERROR::PVR_ERROR_INVALID_PARAMETERS;
 
@@ -2261,10 +2332,6 @@ PVR_ERROR GetRecordings(ADDON_HANDLE handle, bool deleted)
 
 			// iYear
 			recording.iYear = item.year;
-
-			// strStreamURL (required)
-			if(item.streamurl == nullptr) return;
-			snprintf(recording.strStreamURL, std::extent<decltype(recording.strStreamURL)>::value, "%s", item.streamurl);
 
 			// strDirectory
 			if(item.directory != nullptr) {
@@ -2373,6 +2440,20 @@ PVR_ERROR DeleteAllRecordingsFromTrash()
 //	recording	- The recording to rename, containing the new name
 
 PVR_ERROR RenameRecording(PVR_RECORDING const& /*recording*/)
+{
+	return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
+}
+
+//---------------------------------------------------------------------------
+// SetRecordingLifetime
+//
+// Set the lifetime of a recording on the backend
+//
+// Arguments:
+//
+//	recording	- The recording to change the lifetime for
+
+PVR_ERROR SetRecordingLifetime(PVR_RECORDING const* /*recording*/)
 {
 	return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
 }
@@ -2674,7 +2755,7 @@ PVR_ERROR AddTimer(PVR_TIMER const& timer)
 				// No matches found; display an error message to the user and bail out
 				if(matches.size() == 0) {
 
-					g_gui->DialogOK("Series Search Failed", "Unable to locate a series with a title that contains:", timer.strEpgSearchString, "");
+					g_gui->Dialog_OK_ShowAndGetInput("Series Search Failed", "Unable to locate a series with a title that contains:", timer.strEpgSearchString, "");
 					return PVR_ERROR::PVR_ERROR_NO_ERROR;
 				}
 
@@ -2683,7 +2764,7 @@ PVR_ERROR AddTimer(PVR_TIMER const& timer)
 				for(auto const& iterator : matches) items.emplace_back(std::get<0>(iterator).c_str());
 
 				// Create and display the selection dialog to get the specific series the user wants
-				int result = g_gui->DialogSelect("Select Series", items.data(), static_cast<unsigned int>(items.size()), 0);
+				int result = g_gui->Dialog_Select("Select Series", items.data(), static_cast<unsigned int>(items.size()), 0);
 				if(result == -1) return PVR_ERROR::PVR_ERROR_NO_ERROR;
 				
 				seriesid = std::get<1>(matches[result]);
@@ -2697,7 +2778,7 @@ PVR_ERROR AddTimer(PVR_TIMER const& timer)
 				seriesid = find_seriesid(dbhandle, timer.strEpgSearchString);
 				if(seriesid.length() == 0) {
 					
-					g_gui->DialogOK("Series Search Failed", "Unable to locate a series with a title matching:", timer.strEpgSearchString, "");
+					g_gui->Dialog_OK_ShowAndGetInput("Series Search Failed", "Unable to locate a series with a title matching:", timer.strEpgSearchString, "");
 					return PVR_ERROR::PVR_ERROR_NO_ERROR;
 				}
 			}
@@ -2729,7 +2810,7 @@ PVR_ERROR AddTimer(PVR_TIMER const& timer)
 			// If no match was found, the timer cannot be added; use a dialog box rather than returning an error
 			if(seriesid.length() == 0) {
 					
-				g_gui->DialogOK("Series Search Failed", "Unable to locate a series with a title matching:", timer.strEpgSearchString, "");
+				g_gui->Dialog_OK_ShowAndGetInput("Series Search Failed", "Unable to locate a series with a title matching:", timer.strEpgSearchString, "");
 				return PVR_ERROR::PVR_ERROR_NO_ERROR;
 			}
 
@@ -2882,18 +2963,13 @@ PVR_ERROR UpdateTimer(PVR_TIMER const& timer)
 bool OpenLiveStream(PVR_CHANNEL const& channel)
 {
 	char			channelstr[64];			// Channel number as a string
+	std::string		streamurl;				// Generated stream URL
 
 	// Create a copy of the current addon settings structure
 	struct addon_settings settings = copy_settings();
 
-	// This function is not available when direct tuning is enabled
-	if(settings.use_direct_tuning) return false;
-
 	// If the user wants to pause discovery during live streaming, do so
 	if(settings.pause_discovery_while_streaming) g_scheduler.pause();
-
-	// Ensure that any active live stream is closed out and reset first
-	g_livestream.stop();
 
 	// The only interesting thing about PVR_CHANNEL is the channel id
 	union channelid channelid;
@@ -2908,13 +2984,40 @@ bool OpenLiveStream(PVR_CHANNEL const& channel)
 		// Pull a database connection out from the connection pool
 		connectionpool::handle dbhandle(g_connpool);
 
-		// Generate the stream URL for the specified channel
-		std::string streamurl = get_stream_url(dbhandle, channelid);
-		if(streamurl.length() == 0) throw string_exception("unable to determine the URL for specified channel");
+		// If direct tuning is disabled, first attempt to generate the stream URL for the specified 
+		// channel from the storage engine; if that fails we can fall back to using a tuner directly
+		if(settings.use_direct_tuning == false) {
+			
+			streamurl = get_stream_url(dbhandle, channelid);
+			if(streamurl.length() == 0) log_notice(__func__, ": unable to generate storage engine stream URL for channel ", 
+				channelstr, " - falling back to a tuner-direct stream");
+		}
 
-		// Start the new channel live stream
+		// In direct-tuning mode or upon a failure to generate the stream URL for the storage engine
+		// a tuner device must be instead be selected to stream the content
+		if((settings.use_direct_tuning == true) || (streamurl.length() == 0)) {
+
+			// The available tuners for the channel are captured into a vector<>
+			std::vector<std::string> tuners;
+
+			// Create a collection of all the tuners that can possibly stream the requested channel
+			enumerate_channeltuners(dbhandle, channelid, [&](char const* item) -> void { tuners.emplace_back(item); });
+			if(tuners.size() == 0) throw string_exception("unable to find any possible tuners for channel ", channelstr);
+		
+			// Select an available tuner from the possibilities and generate the stream URL
+			std::string selected = select_tuner(tuners);
+			streamurl = get_tuner_stream_url(dbhandle, selected.c_str(), channelid);
+		}
+
+		// If none of the above methods yielded a valid URL, we're done here
+		if(streamurl.length() == 0) throw string_exception("unable to generate a valid stream URL for channel ", channelstr);
+
+		// Stop and destroy any existing stream instance before opening the new one
+		g_dvrstream.reset();
+
+		// Start the new channel stream using the tuning parameters currently specified by the settings
 		log_notice(__func__, ": streaming channel ", channelstr, " via url ", streamurl.c_str());
-		g_livestream.start(streamurl.c_str());
+		g_dvrstream = dvrstream::create(streamurl.c_str(), settings.stream_ring_buffer_size, settings.stream_read_minimum_byte_count, settings.stream_read_timeout);
 
 		return true;
 	}
@@ -2934,11 +3037,17 @@ bool OpenLiveStream(PVR_CHANNEL const& channel)
 
 void CloseLiveStream(void)
 {
-	// Always unpause the scheduler, it won't hurt to do this if it's not paused
+	// Ensure scheduler is running again, it may have been paused
 	g_scheduler.resume();
 
-	// Close out the live stream if it's active
-	try { g_livestream.stop(); }
+	try {
+		
+		// If the DVR stream is active, close it normally so exceptions are
+		// propagated before destroying it; destructor alone won't throw
+		if(g_dvrstream) g_dvrstream->close();
+		g_dvrstream.reset();
+	}
+
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex); }
 	catch(...) { return handle_generalexception(__func__); }
 }
@@ -2955,25 +3064,7 @@ void CloseLiveStream(void)
 
 int ReadLiveStream(unsigned char* buffer, unsigned int size)
 {
-	// This function is not available when direct tuning is enabled
-	if(g_settings.use_direct_tuning) return -1;
-
-	try { 
-
-		// Attempt to read up to the specified amount of data from the live stream buffer,
-		// waiting a ridiculously long time to avoid a zero-length read over poor connections
-		size_t read = g_livestream.read(buffer, size, 5000);
-
-		// Watch for reads that exceeds int::max in length, however unlikely that would be
-		if(read > static_cast<size_t>(std::numeric_limits<int>::max())) 
-			throw string_exception("livestream.read() returned more data than can be represented by data type int");
-
-		// Report a zero-length read in the log associated with the stream that failed
-		if(read == 0) log_error("zero-length read at position ", g_livestream.position());
-
-		return static_cast<int>(read);
-	}
-
+	try { return (g_dvrstream) ? static_cast<int>(g_dvrstream->read(buffer, size)) : -1; }
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
 	catch(...) { return handle_generalexception(__func__, -1); }
 }
@@ -2990,19 +3081,7 @@ int ReadLiveStream(unsigned char* buffer, unsigned int size)
 
 long long SeekLiveStream(long long position, int whence)
 {
-	// This function is not available when direct tuning is enabled
-	if(g_settings.use_direct_tuning) return -1;
-
-	try {
-
-		if(whence == SEEK_SET) { /* use position */ }
-		else if(whence == SEEK_CUR) position = g_livestream.position() + position;
-		else if(whence == SEEK_END) position = g_livestream.length() + position;
-
-		// Request the live stream seek and return the actual position it ends up at
-		return g_livestream.seek(position);
-	}
-
+	try { return (g_dvrstream) ? g_dvrstream->seek(position, whence) : -1; }
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
 	catch(...) { return handle_generalexception(__func__, -1); }
 }
@@ -3018,12 +3097,7 @@ long long SeekLiveStream(long long position, int whence)
 
 long long PositionLiveStream(void)
 {
-	// This function is not available when direct tuning is enabled
-	if(g_settings.use_direct_tuning) return -1;
-
-	// Return the current position within the live stream
-	try { return g_livestream.position(); }
-
+	try { return (g_dvrstream) ? g_dvrstream->position() : -1; }
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
 	catch(...) { return handle_generalexception(__func__, -1); }
 }
@@ -3039,28 +3113,9 @@ long long PositionLiveStream(void)
 
 long long LengthLiveStream(void)
 {
-	// This function is not available when direct tuning is enabled
-	if(g_settings.use_direct_tuning) return -1;
-
-	// Return the length of the current live stream
-	try { return g_livestream.length(); }
-
+	try { return (g_dvrstream) ? g_dvrstream->length() : -1; }
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
 	catch(...) { return handle_generalexception(__func__, -1); }
-}
-
-//---------------------------------------------------------------------------
-// SwitchChannel
-//
-// Switch to another channel. Only to be called when a live stream has already been opened
-//
-// Arguments:
-//
-//	channel		- The channel to switch to
-
-bool SwitchChannel(PVR_CHANNEL const& channel)
-{
-	return OpenLiveStream(channel);
 }
 
 //---------------------------------------------------------------------------
@@ -3078,6 +3133,20 @@ PVR_ERROR SignalStatus(PVR_SIGNAL_STATUS& /*status*/)
 }
 
 //---------------------------------------------------------------------------
+// GetDescrambleInfo
+//
+// Get the descramble information of the stream that's currently open
+//
+// Arguments:
+//
+//	descrambleinfo		- Descramble information
+
+PVR_ERROR GetDescrambleInfo(PVR_DESCRAMBLE_INFO* /*descrambleinfo*/)
+{
+	return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
+}
+
+//---------------------------------------------------------------------------
 // GetLiveStreamURL
 //
 // Get the stream URL for a channel from the backend
@@ -3086,55 +3155,9 @@ PVR_ERROR SignalStatus(PVR_SIGNAL_STATUS& /*status*/)
 //
 //	channel		- The channel to get the stream URL for
 
-char const* GetLiveStreamURL(PVR_CHANNEL const& channel)
+char const* GetLiveStreamURL(PVR_CHANNEL const& /*channel*/)
 {
-	static std::string		streamurl;			// The generated stream URL (static)
-	char					channelstr[64];		// Channel number as a string
-
-	streamurl.clear();			// streamurl is static and reused across invocations
-
-	// This function is only enabled if the addon was started with use_direct_tuning
-	if(!g_settings.use_direct_tuning) return "";
-
-	// The only interesting thing about PVR_CHANNEL is the channel id
-	union channelid channelid;
-	channelid.value = channel.iUniqueId;
-
-	// Generate a string version of the channel number for logging purposes
-	if(channelid.parts.subchannel == 0) snprintf(channelstr, std::extent<decltype(channelstr)>::value, "%d", channelid.parts.channel);
-	else snprintf(channelstr, std::extent<decltype(channelstr)>::value, "%d.%d", channelid.parts.channel, channelid.parts.subchannel);
-
-	try {
-		
-		// The available tuners for the channel are captured into a vector<>
-		std::vector<std::string> tuners;
-
-		// Pull a database connection out from the connection pool
-		connectionpool::handle dbhandle(g_connpool);
-
-		// Create a collection of all the tuners that can possibly stream the requested channel
-		enumerate_channeltuners(dbhandle, channelid, [&](char const* item) -> void { tuners.emplace_back(item); });
-		if(tuners.size() == 0) throw string_exception("unable to find any possible tuners for channel ", channelstr);
-		
-		// Select an available tuner from all of the captured possibilities
-		std::string selected = select_tuner(tuners);
-		
-		// NOTE: There is an inherent race condition here; the tuner is intentionally not
-		// left locked by select_tuner() as the HTTP stream won't be able to use it, causing
-		// the attempt to tune the stream to fail.  I originally left the tuner locked until 
-		// right before returning to Kodi, but that wouldn't have solved anything and just 
-		// caused an additional (albeit minor) delay in getting the URL generated ...
-
-		// Generate the tuner-specific URL to send back to Kodi to tune the channel
-		streamurl = get_tuner_stream_url(dbhandle, selected.c_str(), channelid);
-		if(streamurl.length() == 0) throw string_exception("unable to generate streaming URL for channel ", channelstr);
-
-		log_notice(__func__, ": streaming channel ", channelstr, " via url ", streamurl.c_str());
-		return streamurl.c_str();
-	}
-
-	catch(std::exception& ex) { return handle_stdexception(__func__, ex, ""); }
-	catch(...) { return handle_generalexception(__func__, ""); }
+	return "";
 }
 
 //---------------------------------------------------------------------------
@@ -3162,9 +3185,32 @@ PVR_ERROR GetStreamProperties(PVR_STREAM_PROPERTIES* properties)
 //
 //	recording	- The recording to open
 
-bool OpenRecordedStream(PVR_RECORDING const& /*recording*/)
+bool OpenRecordedStream(PVR_RECORDING const& recording)
 {
-	return false;
+	// Create a copy of the current addon settings structure
+	struct addon_settings settings = copy_settings();
+
+	try {
+
+		// Pull a database connection out from the connection pool
+		connectionpool::handle dbhandle(g_connpool);
+
+		// Generate the stream URL for the specified channel
+		std::string streamurl = get_recording_stream_url(dbhandle, recording.strRecordingId);
+		if(streamurl.length() == 0) throw string_exception("unable to determine the URL for specified recording");
+
+		// Stop and destroy any existing stream instance before opening the new one
+		g_dvrstream.reset();
+
+		// Start the new recording stream using the tuning parameters currently specified by the settings
+		log_notice(__func__, ": streaming recording ", recording.strTitle, " via url ", streamurl.c_str());
+		g_dvrstream = dvrstream::create(streamurl.c_str(), settings.stream_ring_buffer_size, settings.stream_read_minimum_byte_count, settings.stream_read_timeout);
+
+		return true;
+	}
+
+	catch(std::exception& ex) { return handle_stdexception(__func__, ex, false); }
+	catch(...) { return handle_generalexception(__func__, false); }
 }
 
 //---------------------------------------------------------------------------
@@ -3178,6 +3224,19 @@ bool OpenRecordedStream(PVR_RECORDING const& /*recording*/)
 
 void CloseRecordedStream(void)
 {
+	// Ensure scheduler is running again, it may have been paused
+	g_scheduler.resume();
+
+	try {
+		
+		// If the DVR stream is active, close it normally so exceptions are
+		// propagated before destroying it; destructor alone won't throw
+		if(g_dvrstream) g_dvrstream->close();
+		g_dvrstream.reset();
+	}
+
+	catch(std::exception& ex) { return handle_stdexception(__func__, ex); }
+	catch(...) { return handle_generalexception(__func__); }
 }
 
 //---------------------------------------------------------------------------
@@ -3190,9 +3249,11 @@ void CloseRecordedStream(void)
 //	buffer		- The buffer to store the data in
 //	size		- The number of bytes to read into the buffer
 
-int ReadRecordedStream(unsigned char* /*buffer*/, unsigned int /*size*/)
+int ReadRecordedStream(unsigned char* buffer, unsigned int size)
 {
-	return -1;
+	try { return (g_dvrstream) ? static_cast<int>(g_dvrstream->read(buffer, size)) : -1; }
+	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
+	catch(...) { return handle_generalexception(__func__, -1); }
 }
 
 //---------------------------------------------------------------------------
@@ -3205,9 +3266,11 @@ int ReadRecordedStream(unsigned char* /*buffer*/, unsigned int /*size*/)
 //	position	- Delta within the stream to seek, relative to whence
 //	whence		- Starting position from which to apply the delta
 
-long long SeekRecordedStream(long long /*position*/, int /*whence*/)
+long long SeekRecordedStream(long long position, int whence)
 {
-	return -1;
+	try { return (g_dvrstream) ? g_dvrstream->seek(position, whence) : -1; }
+	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
+	catch(...) { return handle_generalexception(__func__, -1); }
 }
 
 //---------------------------------------------------------------------------
@@ -3221,7 +3284,9 @@ long long SeekRecordedStream(long long /*position*/, int /*whence*/)
 
 long long PositionRecordedStream(void)
 {
-	return -1;
+	try { return (g_dvrstream) ? g_dvrstream->position() : -1; }
+	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
+	catch(...) { return handle_generalexception(__func__, -1); }
 }
 
 //---------------------------------------------------------------------------
@@ -3235,7 +3300,9 @@ long long PositionRecordedStream(void)
 
 long long LengthRecordedStream(void)
 {
-	return -1;
+	try { return (g_dvrstream) ? g_dvrstream->length() : -1; }
+	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
+	catch(...) { return handle_generalexception(__func__, -1); }
 }
 
 //---------------------------------------------------------------------------
@@ -3330,10 +3397,9 @@ bool CanPauseStream(void)
 
 bool CanSeekStream(void)
 {
-	// NOTE: This technically doesn't work right with 'direct tune' enabled, but
-	// returning false here prevents pause from being enabled.  The user that
-	// direct tuning was added for preferred broken seek to not having pause
-	return true;
+	try { return (g_dvrstream) ? g_dvrstream->canseek() : false; }
+	catch(std::exception& ex) { return handle_stdexception(__func__, ex, false); }
+	catch(...) { return handle_generalexception(__func__, false); }
 }
 
 //---------------------------------------------------------------------------
@@ -3447,6 +3513,7 @@ char const* GetBackendHostname(void)
 
 bool IsTimeshifting(void)
 {
+	// Detection of time-shifting is not currently supported
 	return false;
 }
 
@@ -3461,7 +3528,9 @@ bool IsTimeshifting(void)
 
 bool IsRealTimeStream(void)
 {
-	return true;
+	try { return (g_dvrstream) ? g_dvrstream->realtime() : false; }
+	catch(std::exception& ex) { return handle_stdexception(__func__, ex, false); }
+	catch(...) { return handle_generalexception(__func__, false); }
 }
 
 //---------------------------------------------------------------------------
@@ -3492,10 +3561,9 @@ void OnSystemSleep()
 {
 	try {
 
-		g_livestream.stop();				// Stop live stream if necessary
-
-		g_scheduler.stop();					// Stop the scheduler
-		g_scheduler.clear();				// Clear out any pending tasks
+		g_dvrstream.reset();			// Destroy any active stream instance
+		g_scheduler.stop();				// Stop the scheduler
+		g_scheduler.clear();			// Clear out any pending tasks
 	}
 
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex); }

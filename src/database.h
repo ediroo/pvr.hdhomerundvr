@@ -79,6 +79,14 @@ enum channel_visibility {
 	disabled			= 2,
 };
 
+// device_name
+//
+// Information about a single device enumerated from the database
+struct device_name {
+
+	char const*			name;
+};
+
 // guideentry
 //
 // Information about a single guide entry enumerated from the database
@@ -187,6 +195,11 @@ using enumerate_channelids_callback = std::function<void(union channelid const& 
 //
 // Callback function passed to enumerate_channeltuners
 using enumerate_channeltuners_callback = std::function<void(char const* tuner)>;
+
+// enumerate_device_names_callback
+//
+// Callback function passed to enumerate_device_names
+using enumerate_device_names_callback = std::function<void(struct device_name const& device_name)>;
 
 // enumerate_guideentries_callback
 //
@@ -379,6 +392,11 @@ void enumerate_channelids(sqlite3* instance, enumerate_channelids_callback callb
 // Enumerates the tuners that can tune a specific channel
 void enumerate_channeltuners(sqlite3* instance, union channelid channelid, enumerate_channeltuners_callback callback);
 
+// enumerate_device_names
+//
+// Enumerates the available device names
+void enumerate_device_names(sqlite3* instance, enumerate_device_names_callback callback);
+
 // enumerate_episode_channelids
 //
 // Enumerates all channels associated with any series episodes
@@ -459,6 +477,11 @@ int get_channel_count(sqlite3* instance);
 //
 // Gets the number of available recordings in the database
 int get_recording_count(sqlite3* instance);
+
+// get_recording_stream_url
+//
+// Gets the playback URL for a recording
+std::string get_recording_stream_url(sqlite3* instance, char const* recordingid);
 
 // get_recordingrule_count
 //

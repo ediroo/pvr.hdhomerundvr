@@ -8,7 +8,7 @@ Copyright (C)2017 Michael G. Brehm
    
 [__CURL__](https://curl.haxx.se/) - Copyright (C)1996 - 2017, Daniel Stenberg, daniel@haxx.se, and many contributors   
 [__ZLIB__](http://www.zlib.net/) - Copyright (C)1995-2017 Jean-loup Gailly and Mark Adler   
-[__LIBHDHOMERUN__](https://github.com/Silicondust/libhdhomerun) - Copyright (C)2005-2016 Silicondust USA Inc     
+[__LIBHDHOMERUN__](https://github.com/Silicondust/libhdhomerun) - Copyright (C)2005-2017 Silicondust USA Inc     
    
 **BUILD ENVIRONMENT**  
 * Windows 10 x64 15063   
@@ -66,22 +66,22 @@ Download the latest jre-8xxx-windows-x64.tar.gz from Oracle:
 **BUILD AND GENERATE KODI ADDON PACKAGES**   
 Open "Developer Command Prompt for VS2017"   
 ```
-git clone https://github.com/djp952/pvr.hdhomerundvr -b Krypton
+git clone https://github.com/djp952/pvr.hdhomerundvr -b Leia
 cd pvr.hdhomerundvr
 git submodule update --init
 msbuild msbuild.proj
 
-> out\zuki.pvr.hdhomerundvr-windows-win32-krypton-x.x.x.x.zip (windows-Win32)
-> out\zuki.pvr.hdhomerundvr-windows-x64-krypton-x.x.x.x.zip (windows-x64)
-> out\zuki.pvr.hdhomerundvr-linux-i686-krypton-x.x.x.x.zip (linux-i686)
-> out\zuki.pvr.hdhomerundvr-linux-x86_64-krypton-x.x.x.x.zip (linux-x86_64)
-> out\zuki.pvr.hdhomerundvr-linux-armel-krypton-x.x.x.x.zip (linux-armel)
-> out\zuki.pvr.hdhomerundvr-linux-armhf-krypton-x.x.x.x.zip (linux-armhf)
-> out\zuki.pvr.hdhomerundvr-linux-aarch64-krypton-x.x.x.x.zip (linux-aarch64)
-> out\zuki.pvr.hdhomerundvr-android-arm-krypton-x.x.x.x.zip (android-arm)
-> out\zuki.pvr.hdhomerundvr-android-aarch64-krypton-x.x.x.x.zip (android-aarch64)
-> out\zuki.pvr.hdhomerundvr-android-x86-krypton-x.x.x.x.zip (android-x86)
-> out\zuki.pvr.hdhomerundvr-raspbian-armhf-krypton-x.x.x.x.zip (raspbian-armhf)
+> out\zuki.pvr.hdhomerundvr-windows-win32-leia-x.x.x.x.zip (windows-Win32)
+> out\zuki.pvr.hdhomerundvr-windows-x64-leia-x.x.x.x.zip (windows-x64)
+> out\zuki.pvr.hdhomerundvr-linux-i686-leia-x.x.x.x.zip (linux-i686)
+> out\zuki.pvr.hdhomerundvr-linux-x86_64-leia-x.x.x.x.zip (linux-x86_64)
+> out\zuki.pvr.hdhomerundvr-linux-armel-leia-x.x.x.x.zip (linux-armel)
+> out\zuki.pvr.hdhomerundvr-linux-armhf-leia-x.x.x.x.zip (linux-armhf)
+> out\zuki.pvr.hdhomerundvr-linux-aarch64-leia-x.x.x.x.zip (linux-aarch64)
+> out\zuki.pvr.hdhomerundvr-android-arm-leia-x.x.x.x.zip (android-arm)
+> out\zuki.pvr.hdhomerundvr-android-aarch64-leia-x.x.x.x.zip (android-aarch64)
+> out\zuki.pvr.hdhomerundvr-android-x86-leia-x.x.x.x.zip (android-x86)
+> out\zuki.pvr.hdhomerundvr-raspbian-armhf-leia-x.x.x.x.zip (raspbian-armhf)
 ```
    
 **BUILD AND GENERATE MODIFIED KODI ANDROID APKS**   
@@ -89,7 +89,7 @@ Building the modified Kodi Android APKs requires a Java keystore to be specified
    
 Open "Developer Command Prompt for VS2017"   
 ```
-git clone https://github.com/djp952/pvr.hdhomerundvr -b Krypton
+git clone https://github.com/djp952/pvr.hdhomerundvr -b Leia
 cd pvr.hdhomerundvr
 git submodule update --init
 msbuild msbuild.proj /t:PackageApk /p:Keystore={path_to_keystore};KeystorePassword={keystore_password}

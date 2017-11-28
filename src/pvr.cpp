@@ -152,6 +152,16 @@ struct addon_settings {
 	// Flag to include the episode number in recording titles
 	bool use_episode_number_as_title;
 
+	// use_backend_genre_strings
+	//
+	// Flag to use the backend provided genre strings instead of mapping them
+	bool use_backend_genre_strings;
+
+	// show_drm_protected_channels
+	//
+	// Flag indicating that DRM channels should be shown to the user
+	bool show_drm_protected_channels;
+
 	// delete_datetime_rules_after
 	//
 	// Amount of time (seconds) after which an expired date/time rule is deleted
@@ -227,6 +237,16 @@ struct addon_settings {
 // Kodi add-on callbacks
 static std::unique_ptr<ADDON::CHelper_libXBMC_addon> g_addon;
 
+// g_addon_lock
+//
+// Synchronization object to serialize access to addon callbacks
+static std::mutex g_addon_lock;
+
+// g_addon_refs
+//
+// Reference count for calls to ADDON_Create/ADDON_Destroy
+static int g_addon_refs = 0;
+
 // g_capabilities (const)
 //
 // PVR implementation capability flags
@@ -244,7 +264,7 @@ static const PVR_ADDON_CAPABILITIES g_capabilities = {
 	true,			// bHandlesInputStream
 	false,			// bHandlesDemuxing
 	false,			// bSupportsRecordingPlayCount
-	false,			// bSupportsLastPlayedPosition
+	true,			// bSupportsLastPlayedPosition
 	false,			// bSupportsRecordingEdl
 	false,			// bSupportsRecordingsRename
 	false,			// bSupportsRecordingsLifetimeChange
@@ -291,6 +311,8 @@ static addon_settings g_settings = {
 	false,					// pause_discovery_while_streaming
 	false,					// prepend_channel_numbers
 	false,					// use_episode_number_as_title
+	false,					// use_backend_genre_strings
+	false,					// show_drm_protected_channels
 	86400,					// delete_datetime_rules_after			default = 1 day
 	false,					// use_broadcast_device_discovery
 	300, 					// discover_devices_interval;			default = 5 minutes
@@ -309,7 +331,7 @@ static addon_settings g_settings = {
 // g_settings_lock
 //
 // Synchronization object to serialize access to addon settings
-std::mutex g_settings_lock;
+static std::mutex g_settings_lock;
 
 // g_timertypes (const)
 //
@@ -382,8 +404,11 @@ static const PVR_TIMER_TYPE g_timertypes[] ={
 		timer_type::epgseriesrule,
 
 		// iAttributes
+		//
+		// todo: PVR_TIMER_TYPE_REQUIRES_EPG_SERIESLINK_ON_CREATE can be set here, but seems to have bugs right now, after Kodi
+		// is stopped and restarted, the cached EPG data prevents adding a new timer if this is set
 		PVR_TIMER_TYPE_IS_REPEATING | PVR_TIMER_TYPE_SUPPORTS_CHANNELS | PVR_TIMER_TYPE_SUPPORTS_RECORD_ONLY_NEW_EPISODES | 
-			PVR_TIMER_TYPE_SUPPORTS_START_END_MARGIN | PVR_TIMER_TYPE_REQUIRES_EPG_SERIES_ON_CREATE,
+			PVR_TIMER_TYPE_SUPPORTS_START_END_MARGIN | PVR_TIMER_TYPE_REQUIRES_EPG_SERIES_ON_CREATE | PVR_TIMER_TYPE_SUPPORTS_ANY_CHANNEL,
 
 		// strDescription
 		"Record Series",
@@ -410,6 +435,9 @@ static const PVR_TIMER_TYPE g_timertypes[] ={
 		timer_type::epgdatetimeonlyrule,
 
 		// iAttributes
+		//
+		// todo: PVR_TIMER_TYPE_REQUIRES_EPG_SERIESLINK_ON_CREATE can be set here, but seems to have bugs right now, after Kodi
+		// is stopped and restarted, the cached EPG data prevents adding a new timer if this is set
 		PVR_TIMER_TYPE_SUPPORTS_CHANNELS | PVR_TIMER_TYPE_SUPPORTS_START_END_MARGIN | PVR_TIMER_TYPE_REQUIRES_EPG_SERIES_ON_CREATE,
 
 		// strDescription
@@ -1019,6 +1047,16 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 
 	if((handle == nullptr) || (props == nullptr)) return ADDON_STATUS::ADDON_STATUS_PERMANENT_FAILURE;
 
+	// Kodi 18 "Leia" allows ADDON_Create to be called multiple times from multiple threads
+	// when the addon is being installed; work around this with a mutex and a reference counter
+	std::unique_lock<std::mutex> lock(g_addon_lock);
+	if((++g_addon_refs) > 1) {
+
+		assert(g_addon);
+		log_notice(__func__, ": warning: bypassing addon initialization (refs = ", g_addon_refs, ")");
+		return ADDON_STATUS::ADDON_STATUS_OK;
+	}
+
 	// Copy anything relevant from the provided parameters
 	PVR_PROPERTIES* pvrprops = reinterpret_cast<PVR_PROPERTIES*>(props);
 	g_epgmaxtime = pvrprops->iEpgMaxDays;
@@ -1045,7 +1083,7 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 		if(!g_addon->RegisterMe(handle)) throw string_exception("Failed to register addon handle (CHelper_libXBMC_addon::RegisterMe)");
 
 		// Throw a banner out to the Kodi log indicating that the add-on is being loaded
-		log_notice(VERSION_PRODUCTNAME_ANSI, " v", VERSION_VERSION3_ANSI, " loading");
+		log_notice(__func__, ": ", VERSION_PRODUCTNAME_ANSI, " v", VERSION_VERSION3_ANSI, " loading");
 
 		try { 
 
@@ -1061,6 +1099,8 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 			if(g_addon->GetSetting("pause_discovery_while_streaming", &bvalue)) g_settings.pause_discovery_while_streaming = bvalue;
 			if(g_addon->GetSetting("prepend_channel_numbers", &bvalue)) g_settings.prepend_channel_numbers = bvalue;
 			if(g_addon->GetSetting("use_episode_number_as_title", &bvalue)) g_settings.use_episode_number_as_title = bvalue;
+			if(g_addon->GetSetting("use_backend_genre_strings", &bvalue)) g_settings.use_backend_genre_strings = bvalue;
+			if(g_addon->GetSetting("show_drm_protected_channels", &bvalue)) g_settings.show_drm_protected_channels = bvalue;
 			if(g_addon->GetSetting("delete_datetime_rules_after", &nvalue)) g_settings.delete_datetime_rules_after = delete_expired_enum_to_seconds(nvalue);
 
 			// Load the discovery interval settings
@@ -1241,7 +1281,7 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 	catch(...) { return ADDON_STATUS::ADDON_STATUS_PERMANENT_FAILURE; }
 
 	// Throw a simple banner out to the Kodi log indicating that the add-on has been loaded
-	log_notice(VERSION_PRODUCTNAME_ANSI, " v", VERSION_VERSION3_ANSI, " loaded");
+	log_notice(__func__, ": ", VERSION_PRODUCTNAME_ANSI, " v", VERSION_VERSION3_ANSI, " loaded");
 
 	return ADDON_STATUS::ADDON_STATUS_OK;
 }
@@ -1257,8 +1297,15 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 
 void ADDON_Destroy(void)
 {
+	// Kodi 18 "Leia" allows ADDON_Destroy to be called multiple times from multiple threads
+	// when the addon is being installed; work around this with a mutex and a reference counter
+	std::unique_lock<std::mutex> lock(g_addon_lock);
+	if((--g_addon_refs) > 0) return log_notice(__func__, ": warning: bypassing addon termination (refs = ", g_addon_refs, ")");
+
+	assert(g_addon_refs == 0);				// Verify this is only happening one time
+
 	// Throw a message out to the Kodi log indicating that the add-on is being unloaded
-	log_notice(VERSION_PRODUCTNAME_ANSI, " v", VERSION_VERSION3_ANSI, " unloading");
+	log_notice(__func__, ": ", VERSION_PRODUCTNAME_ANSI, " v", VERSION_VERSION3_ANSI, " unloading");
 
 	g_dvrstream.reset();					// Destroy any active stream instance
 	g_scheduler.stop();						// Stop the task scheduler
@@ -1275,7 +1322,7 @@ void ADDON_Destroy(void)
 	g_gui.reset();
 
 	// Send a notice out to the Kodi log as late as possible and destroy the addon callbacks
-	log_notice(VERSION_PRODUCTNAME_ANSI, " v", VERSION_VERSION3_ANSI, " unloaded");
+	log_notice(__func__, ": ", VERSION_PRODUCTNAME_ANSI, " v", VERSION_VERSION3_ANSI, " unloaded");
 	g_addon.reset();
 
 	// Clean up libcurl
@@ -1350,6 +1397,32 @@ ADDON_STATUS ADDON_SetSetting(char const* name, void const* value)
 			g_settings.use_episode_number_as_title = bvalue;
 			log_notice(__func__, ": setting use_episode_number_as_title changed to ", (bvalue) ? "true" : "false", " -- trigger recording update");
 			g_pvr->TriggerRecordingUpdate();
+		}
+	}
+
+	// use_backend_genre_strings
+	//
+	else if(strcmp(name, "use_backend_genre_strings") == 0) {
+
+		bool bvalue = *reinterpret_cast<bool const*>(value);
+		if(bvalue != g_settings.use_backend_genre_strings) {
+
+			g_settings.use_backend_genre_strings = bvalue;
+			log_notice(__func__, ": setting use_backend_genre_strings changed to ", (bvalue) ? "true" : "false");
+		}
+	}
+
+	// show_drm_protected_channels
+	//
+	else if(strcmp(name, "show_drm_protected_channels") == 0) {
+
+		bool bvalue = *reinterpret_cast<bool const*>(value);
+		if(bvalue != g_settings.show_drm_protected_channels) {
+
+			g_settings.show_drm_protected_channels = bvalue;
+			log_notice(__func__, ": setting show_drm_protected_channels changed to ", (bvalue) ? "true" : "false", " -- trigger channel and channel group updates");
+			g_pvr->TriggerChannelUpdate();
+			g_pvr->TriggerChannelGroupsUpdate();
 		}
 	}
 
@@ -1904,6 +1977,9 @@ PVR_ERROR GetEPGForChannel(ADDON_HANDLE handle, PVR_CHANNEL const& channel, time
 
 	try {
 
+		// Create a copy of the current addon settings structure
+		struct addon_settings settings = copy_settings();
+
 		// Pull a database connection out from the connection pool
 		connectionpool::handle dbhandle(g_connpool);
 
@@ -1916,12 +1992,12 @@ PVR_ERROR GetEPGForChannel(ADDON_HANDLE handle, PVR_CHANNEL const& channel, time
 			// iUniqueBroadcastId (required)
 			epgtag.iUniqueBroadcastId = static_cast<unsigned int>(item.starttime);
 
+			// iUniqueChannelId (required)
+			epgtag.iUniqueChannelId = item.channelid;
+
 			// strTitle (required)
 			if(item.title == nullptr) return;
 			epgtag.strTitle = item.title;
-
-			// iChannelNumber (required)
-			epgtag.iChannelNumber = item.channelid;
 
 			// startTime (required)
 			epgtag.startTime = item.starttime;
@@ -1939,7 +2015,10 @@ PVR_ERROR GetEPGForChannel(ADDON_HANDLE handle, PVR_CHANNEL const& channel, time
 			if(item.iconurl != nullptr) epgtag.strIconPath = item.iconurl;
 
 			// iGenreType
-			epgtag.iGenreType = item.genretype;
+			epgtag.iGenreType = (settings.use_backend_genre_strings) ? EPG_GENRE_USE_STRING : item.genretype;
+
+			// strGenreDescription
+			if(settings.use_backend_genre_strings) epgtag.strGenreDescription = item.genres;
 
 			// firstAired
 			epgtag.firstAired = item.originalairdate;
@@ -1959,6 +2038,9 @@ PVR_ERROR GetEPGForChannel(ADDON_HANDLE handle, PVR_CHANNEL const& channel, time
 			// iFlags
 			epgtag.iFlags = EPG_TAG_FLAG_IS_SERIES;
 
+			// strSeriesLink
+			epgtag.strSeriesLink = item.seriesid;
+
 			// Transfer the EPG_TAG structure over to Kodi
 			g_pvr->TransferEpgEntry(handle, &epgtag);
 		});
@@ -1968,6 +2050,52 @@ PVR_ERROR GetEPGForChannel(ADDON_HANDLE handle, PVR_CHANNEL const& channel, time
 	catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
 
 	return PVR_ERROR::PVR_ERROR_NO_ERROR;
+}
+
+//---------------------------------------------------------------------------
+// IsEPGTagRecordable
+//
+// Check if the given EPG tag can be recorded
+//
+// Arguments:
+//
+//	tag			- EPG tag to be checked
+//	recordable	- Flag indicating if the EPG tag can be recorded
+
+PVR_ERROR IsEPGTagRecordable(EPG_TAG const* /*tag*/, bool* /*recordable*/)
+{
+	return PVR_ERROR_NOT_IMPLEMENTED;
+}
+
+//---------------------------------------------------------------------------
+// IsEPGTagPlayable
+//
+// Check if the given EPG tag can be played
+//
+// Arguments:
+//
+//	tag			- EPG tag to be checked
+//	playable	- Flag indicating if the EPG tag can be played
+
+PVR_ERROR IsEPGTagPlayable(EPG_TAG const* /*tag*/, bool* /*playable*/)
+{
+	return PVR_ERROR_NOT_IMPLEMENTED;
+}
+
+//---------------------------------------------------------------------------
+// GetEPGTagStreamProperties
+//
+// Get the stream properties for an epg tag from the backend
+//
+// Arguments:
+//
+//	tag			- EPG tag for which to retrieve the properties
+//	props		- Array in which to set the stream properties
+//	numprops	- Number of properties returned by this function
+
+PVR_ERROR GetEPGTagStreamProperties(EPG_TAG const* /*tag*/, PVR_NAMED_VALUE* /*props*/, unsigned int* /*numprops*/)
+{
+	return PVR_ERROR_NOT_IMPLEMENTED;
 }
 
 //---------------------------------------------------------------------------
@@ -2039,7 +2167,7 @@ PVR_ERROR GetChannelGroupMembers(ADDON_HANDLE handle, PVR_CHANNEL_GROUP const& g
 
 	// Determine which group enumerator to use for the operation, there are only
 	// three to choose from: "Favorite Channels", "HD Channels" and "SD Channels"
-	std::function<void(sqlite3*, enumerate_channelids_callback)> enumerator = nullptr;
+	std::function<void(sqlite3*, bool, enumerate_channelids_callback)> enumerator = nullptr;
 	if(strcmp(group.strGroupName, "Favorite Channels") == 0) enumerator = enumerate_favorite_channelids;
 	else if(strcmp(group.strGroupName, "HD Channels") == 0) enumerator = enumerate_hd_channelids;
 	else if(strcmp(group.strGroupName, "SD Channels") == 0) enumerator = enumerate_sd_channelids;
@@ -2053,11 +2181,14 @@ PVR_ERROR GetChannelGroupMembers(ADDON_HANDLE handle, PVR_CHANNEL_GROUP const& g
 
 	try {
 
+		// Create a copy of the current addon settings structure
+		struct addon_settings settings = copy_settings();
+
 		// Pull a database connection out from the connection pool
 		connectionpool::handle dbhandle(g_connpool);
 
 		// Enumerate all of the channels in the specified group
-		enumerator(dbhandle, [&](union channelid const& item) -> void {
+		enumerator(dbhandle, settings.show_drm_protected_channels, [&](union channelid const& item) -> void {
 
 			PVR_CHANNEL_GROUP_MEMBER member;						// PVR_CHANNEL_GROUP_MEMORY to send
 			memset(&member, 0, sizeof(PVR_CHANNEL_GROUP_MEMBER));	// Initialize the structure
@@ -2109,7 +2240,7 @@ PVR_ERROR OpenDialogChannelScan(void)
 
 int GetChannelsAmount(void)
 {
-	try { return get_channel_count(connectionpool::handle(g_connpool)); }
+	try { return get_channel_count(connectionpool::handle(g_connpool), copy_settings().show_drm_protected_channels); }
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
 	catch(...) { return handle_generalexception(__func__, -1); }
 }
@@ -2146,7 +2277,7 @@ PVR_ERROR GetChannels(ADDON_HANDLE handle, bool radio)
 		connectionpool::handle dbhandle(g_connpool);
 
 		// Enumerate all of the channels in the database
-		enumerate_channels(dbhandle, settings.prepend_channel_numbers, [&](struct channel const& item) -> void {
+		enumerate_channels(dbhandle, settings.prepend_channel_numbers, settings.show_drm_protected_channels, [&](struct channel const& item) -> void {
 
 			PVR_CHANNEL channel;								// PVR_CHANNEL to be transferred to Kodi
 			memset(&channel, 0, sizeof(PVR_CHANNEL));			// Initialize the structure
@@ -2168,6 +2299,11 @@ PVR_ERROR GetChannels(ADDON_HANDLE handle, bool radio)
 
 			// strInputFormat
 			snprintf(channel.strInputFormat, std::extent<decltype(channel.strInputFormat)>::value, "video/mp2t");
+
+			// iEncryptionSystem
+			//
+			// This is used to flag a channel as DRM to prevent it from being streamed
+			channel.iEncryptionSystem = (item.drm) ? std::numeric_limits<unsigned int>::max() : 0;
 
 			// strIconPath
 			if(item.iconurl != nullptr) snprintf(channel.strIconPath, std::extent<decltype(channel.strIconPath)>::value, "%s", item.iconurl);
@@ -2362,6 +2498,10 @@ PVR_ERROR GetRecordings(ADDON_HANDLE handle, bool deleted)
 			// iDuration
 			recording.iDuration = item.duration;
 
+			// iLastPlayedPosition
+			//
+			recording.iLastPlayedPosition = item.lastposition;
+
 			// iChannelUid
 			recording.iChannelUid = item.channelid.value;
 
@@ -2481,11 +2621,18 @@ PVR_ERROR SetRecordingPlayCount(PVR_RECORDING const& /*recording*/, int /*playco
 // Arguments:
 //
 //	recording			- The recording
-//	lastplayedposition	- The last watched position in seconds
+//	lastposition		- The last watched position in seconds
 
-PVR_ERROR SetRecordingLastPlayedPosition(PVR_RECORDING const& /*recording*/, int /*lastplayedposition*/)
+PVR_ERROR SetRecordingLastPlayedPosition(PVR_RECORDING const& recording, int lastposition)
 {
-	return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
+	try {
+		
+		set_recording_lastposition(connectionpool::handle(g_connpool), recording.strRecordingId, lastposition);
+		return PVR_ERROR::PVR_ERROR_NO_ERROR;
+	}
+
+	catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
+	catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
 }
 
 //---------------------------------------------------------------------------
@@ -2497,9 +2644,11 @@ PVR_ERROR SetRecordingLastPlayedPosition(PVR_RECORDING const& /*recording*/, int
 //
 //	recording	- The recording
 
-int GetRecordingLastPlayedPosition(PVR_RECORDING const& /*recording*/)
+int GetRecordingLastPlayedPosition(PVR_RECORDING const& recording)
 {
-	return -1;
+	try { return get_recording_lastposition(connectionpool::handle(g_connpool), recording.strRecordingId); }
+	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
+	catch(...) { return handle_generalexception(__func__, -1); }
 }
 
 //---------------------------------------------------------------------------
@@ -2652,6 +2801,9 @@ PVR_ERROR GetTimers(ADDON_HANDLE handle)
 			// iMarginEnd
 			timer.iMarginEnd = (item.endpadding / 60);
 
+			// strSeriesLink
+			snprintf(timer.strSeriesLink, std::extent<decltype(timer.strSeriesLink)>::value, "%s", item.seriesid);
+
 			// Copy the PVR_TIMER structure into the local vector<>
 			timers.push_back(timer);
 		});
@@ -2738,6 +2890,9 @@ PVR_ERROR AddTimer(PVR_TIMER const& timer)
 
 		// Pull a database connection out from the connection pool
 		connectionpool::handle dbhandle(g_connpool);
+
+		// todo: can use strSeriesLink here for EPG timers instead of searching, once that works properly in Kodi.
+		// Right now the strSeriesLink information seems to disappear after Kodi is stopped and restarted
 
 		// seriesrule / epgseriesrule --> recordingrule_type::series
 		//
@@ -2965,6 +3120,14 @@ bool OpenLiveStream(PVR_CHANNEL const& channel)
 	char			channelstr[64];			// Channel number as a string
 	std::string		streamurl;				// Generated stream URL
 
+	// DRM channels are flagged with a non-zero iEncryptionSystem value to prevent streaming
+	if(channel.iEncryptionSystem != 0) {
+	
+		std::string text = "Channel " + std::string(channel.strChannelName) + " is marked as encrypted and cannot be played";
+		g_gui->Dialog_OK_ShowAndGetInput("DRM Protected Content", text.c_str());
+		return false;
+	}
+
 	// Create a copy of the current addon settings structure
 	struct addon_settings settings = copy_settings();
 
@@ -3081,7 +3244,30 @@ int ReadLiveStream(unsigned char* buffer, unsigned int size)
 
 long long SeekLiveStream(long long position, int whence)
 {
-	try { return (g_dvrstream) ? g_dvrstream->seek(position, whence) : -1; }
+	long long		requested = 0;			// Calculated requested position
+
+	if(!g_dvrstream) return -1;				// No active dvrstream instance
+
+	try {
+
+		// Calculate the expected seek position to compare with the result
+		if(whence == SEEK_SET) requested = position;
+		else if(whence == SEEK_CUR) requested = g_dvrstream->position() + position;
+		else if(whence == SEEK_END) requested = g_dvrstream->length() + position;
+		else throw std::invalid_argument("whence");
+
+		// Perform the stream seek operation; throw exception on overflow
+		unsigned long long result = g_dvrstream->seek(position, whence);
+		if(result > static_cast<unsigned long long>(std::numeric_limits<long long>::max())) 
+			throw string_exception("seek result exceeds std::numeric_limits<long long>::max()");
+
+		// Compare the result with the expected position and issue a notice in the logs
+		if(static_cast<long long>(result) != requested) 
+			log_notice(__func__, ": seek request was not satisfied (requested=", requested, ", result=", result, ")");
+
+		return static_cast<long long>(result);
+	}
+
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
 	catch(...) { return handle_generalexception(__func__, -1); }
 }
@@ -3147,17 +3333,35 @@ PVR_ERROR GetDescrambleInfo(PVR_DESCRAMBLE_INFO* /*descrambleinfo*/)
 }
 
 //---------------------------------------------------------------------------
-// GetLiveStreamURL
+// GetChannelStreamProperties
 //
-// Get the stream URL for a channel from the backend
+// Gets the properties for channel streams when the input stream is not handled
 //
 // Arguments:
 //
-//	channel		- The channel to get the stream URL for
+//	channel		- Channel to get the stream properties for
+//	props		- Array of properties to be set for the stream
+//	numprops	- Number of properties returned by this function
 
-char const* GetLiveStreamURL(PVR_CHANNEL const& /*channel*/)
+PVR_ERROR GetChannelStreamProperties(PVR_CHANNEL const* /*channel*/, PVR_NAMED_VALUE* /*props*/, unsigned int* /*numprops*/)
 {
-	return "";
+	return PVR_ERROR_NOT_IMPLEMENTED;
+}
+
+//---------------------------------------------------------------------------
+// GetRecordingStreamProperties
+//
+// Gets the properties for recording streams when the input stream is not handled
+//
+// Arguments:
+//
+//	recording	- Recording to get the stream properties for
+//	props		- Array of properties to be set for the stream
+//	numprops	- Number of properties returned by this function
+
+PVR_ERROR GetRecordingStreamProperties(PVR_RECORDING const* /*recording*/, PVR_NAMED_VALUE* /*props*/, unsigned int* /*numprops*/)
+{
+	return PVR_ERROR_NOT_IMPLEMENTED;
 }
 
 //---------------------------------------------------------------------------
@@ -3268,7 +3472,30 @@ int ReadRecordedStream(unsigned char* buffer, unsigned int size)
 
 long long SeekRecordedStream(long long position, int whence)
 {
-	try { return (g_dvrstream) ? g_dvrstream->seek(position, whence) : -1; }
+	long long		requested = 0;			// Calculated requested position
+
+	if(!g_dvrstream) return -1;				// No active dvrstream instance
+
+	try {
+
+		// Calculate the expected seek position to compare with the result
+		if(whence == SEEK_SET) requested = position;
+		else if(whence == SEEK_CUR) requested = g_dvrstream->position() + position;
+		else if(whence == SEEK_END) requested = g_dvrstream->length() + position;
+		else throw std::invalid_argument("whence");
+
+		// Perform the stream seek operation; throw exception on overflow
+		unsigned long long result = g_dvrstream->seek(position, whence);
+		if(result > static_cast<unsigned long long>(std::numeric_limits<long long>::max())) 
+			throw string_exception("seek result exceeds std::numeric_limits<long long>::max()");
+
+		// Compare the result with the expected position and issue a notice in the logs
+		if(static_cast<long long>(result) != requested) 
+			log_notice(__func__, ": seek request was not satisfied (requested=", requested, ", result=", result, ")");
+
+		return static_cast<long long>(result);
+	}
+
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
 	catch(...) { return handle_generalexception(__func__, -1); }
 }
@@ -3356,20 +3583,6 @@ void DemuxFlush(void)
 DemuxPacket* DemuxRead(void)
 {
 	return nullptr;
-}
-
-//---------------------------------------------------------------------------
-// GetChannelSwitchDelay
-//
-// Gets delay to use when using switching channels for add-ons not providing an input stream
-//
-// Arguments:
-//
-//	NONE
-
-unsigned int GetChannelSwitchDelay(void)
-{
-	return 0;
 }
 
 //---------------------------------------------------------------------------
@@ -3625,6 +3838,16 @@ void OnPowerSavingActivated()
 
 void OnPowerSavingDeactivated()
 {
+}
+
+//---------------------------------------------------------------------------
+// GetStreamTimes
+//
+// Temporary function to be removed in later PVR API version
+
+PVR_ERROR GetStreamTimes(PVR_STREAM_TIMES* /*times*/)
+{
+	return PVR_ERROR_NOT_IMPLEMENTED;
 }
 
 //---------------------------------------------------------------------------

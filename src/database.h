@@ -33,7 +33,7 @@
 
 #include "scalar_condition.h"
 
-#pragma warning(push, 4)				// Enable maximum compiler warnings
+#pragma warning(push, 4)
 
 //---------------------------------------------------------------------------
 // DATA TYPES
@@ -417,7 +417,7 @@ void enumerate_favorite_channelids(sqlite3* instance, bool showdrm, enumerate_ch
 // enumerate_guideentries
 //
 // Enumerates the available guide entries for a channel and time period
-void enumerate_guideentries(sqlite3* instance, union channelid channelid, time_t starttime, time_t endtime, enumerate_guideentries_callback callback);
+void enumerate_guideentries(sqlite3* instance, union channelid channelid, time_t starttime, time_t endtime, bool prependnumber, enumerate_guideentries_callback callback);
 
 // enumerate_hd_channelids
 //
@@ -479,6 +479,11 @@ int get_channel_count(sqlite3* instance, bool showdrm);
 //
 // Gets the number of available recordings in the database
 int get_recording_count(sqlite3* instance);
+
+// get_recording_filename
+//
+// Generates the filename for a recording
+std::string get_recording_filename(sqlite3* instance, char const* recordingid);
 
 // get_recording_lastposition
 //

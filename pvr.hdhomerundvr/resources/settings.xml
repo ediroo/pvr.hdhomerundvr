@@ -6,7 +6,9 @@
     <setting id="pause_discovery_while_streaming" label="30100" type="bool" default="false"/>
     <setting id="prepend_channel_numbers" label="30107" type="bool" default="false"/>
     <setting id="use_episode_number_as_title" label="30112" type="bool" default="false"/>
+    <setting id="discover_recordings_after_playback" label="30123" type="bool" default="false"/>
     <setting id="use_backend_genre_strings" label="30117" type="bool" default="false"/>
+    <setting id="prepend_episode_numbers_in_epg" label="30126" type="bool" default="false"/>
     <setting id="show_drm_protected_channels" label="30118" type="bool" default="false"/>
     <setting id="delete_datetime_rules_after" label="30108" type="enum" lvalues="30213|30209|30210|30211|30212" default="3"/>
   </category>
@@ -20,12 +22,21 @@
     <setting id="discover_episodes_interval" label="30106" type="enum" lvalues="30201|30202|30203|30204|30205|30206|30207|30208" default="6"/>
   </category>
 
+  <category label="30003">
+    <setting id="enable_recording_edl" label="30119" type="bool" default="false"/>
+    <setting id="recording_edl_folder" enable="eq(-1,true)" label="30120" type="folder" source="auto" option="writeable"/>
+    <setting id="recording_edl_start_padding" enable="eq(-2,true)" label="30121" type="slider" default="0" range="0,500,10000" option="int"/>
+    <setting id="recording_edl_end_padding" enable="eq(-3,true)" label="30122" type="slider" default="0" range="0,500,10000" option="int"/>
+  </category>
+
   <category label="30002">
     <setting id="use_direct_tuning" label="30111" type="bool" default="false"/>
     <setting id="startup_discovery_task_delay" label="30113" type="slider" default="3" range="1,1,10" option="int"/>
     <setting id="stream_read_timeout" label="30116" type="slider" default="2500" range="500,500,5000" option="int"/>
     <setting id="stream_read_minimum_byte_count" label="30114" type="enum" lvalues="30218|30219|30220|30221|30222|30223" default="1"/>
     <setting id="stream_ring_buffer_size" label="30115" type="enum" lvalues="30224|30225|30226|30227|30228" default="2"/>
+    <setting id="verbose_transfer_logging" label="30124" type="bool" default="false"/>
+    <setting id="disable_realtime_indicator" label="30125" type="bool" default="false"/>
   </category>
 
 </settings>

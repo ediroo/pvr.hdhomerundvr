@@ -1,3 +1,19 @@
+v1.2.8 (2017.12.29)
+  - Update zlib library to version 1.2.11
+  - Update cURL library to version 7.57.0
+  - Add "Prepend season/episode number to episode name in EPG" setting
+  - Add "Enable verbose data transfer logs" advanced setting
+  - Add "Disable reporting of real-time MPEG-TS streams" advanced setting
+  - Fix logging of HTTP request errors that occurred during multi-step database queries
+  - Fix bug causing "Trigger recording discovery immediately after playback" to be applied to "Use network broadcast for device discovery" until restart
+  - Fix bug causing stale Timers to appear in Kodi if a series with a valid recording rule has no episode information on the backend
+  - (OSX) Initial release for Apple OSX x86_64
+
+v1.2.7 (2017.12.05)
+  - Improve handling of in-progress Recorded TV streams that have switched from a live to a recorded state
+  - Add support for processing Recorded TV Edit Decision Lists (EDL)
+  - Add "Trigger recording discovery immediately after playback" setting
+
 v1.2.6 (2017.11.30)
   - Fix forward seeking problems with Live TV streams
   - Fix playback problems with in-progress Recorded TV streams
@@ -13,7 +29,7 @@ v1.2.4 (2017.11.24)
   - Add workaround to handle multiple calls into ADDON_Create/ADDON_Destroy during installation
 
 v1.2.3 (2017.11.15)
-  - Update SQLite database engine to v3.21.0
+  - Update SQLite database engine to version 3.21.0
   - Update cURL library to version 7.56.1
   - Update libhdhomerun library to version 2017.08.16
 

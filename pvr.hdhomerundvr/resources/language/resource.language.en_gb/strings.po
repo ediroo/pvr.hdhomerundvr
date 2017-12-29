@@ -28,6 +28,10 @@ msgctxt "#30002"
 msgid "Advanced"
 msgstr ""
 
+msgctxt "#30003"
+msgid "EDL"
+msgstr ""
+
 msgctxt "#30100"
 msgid "Pause discovery while streaming Live TV channels"
 msgstr ""
@@ -98,6 +102,38 @@ msgstr ""
 
 msgctxt "#30118"
 msgid "Show DRM protected channels in channel lineups"
+msgstr ""
+
+msgctxt "#30119"
+msgid "Enable Edit Decision List (EDL) support for Recorded TV"
+msgstr ""
+
+msgctxt "#30120"
+msgid "EDL file path"
+msgstr ""
+
+msgctxt "#30121"
+msgid "Start time padding (milliseconds)"
+msgstr ""
+
+msgctxt "#30122"
+msgid "End time padding (milliseconds)"
+msgstr ""
+
+msgctxt "#30123"
+msgid "Trigger recording discovery immediately after playback"
+msgstr ""
+
+msgctxt "#30124"
+msgid "Enable verbose data transfer logs"
+msgstr ""
+
+msgctxt "#30125"
+msgid "Disable reporting of real-time MPEG-TS streams"
+msgstr ""
+
+msgctxt "#30126"
+msgid "Prepend season/episode number to episode name in EPG"
 msgstr ""
 
 msgctxt "#30201"

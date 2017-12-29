@@ -24,6 +24,7 @@
 #include "database.h"
 
 #include <algorithm>
+#include <cctype>
 #include <exception>
 #include <stdint.h>
 #include <string.h>
@@ -57,6 +58,7 @@
 // FUNCTION PROTOTYPES
 //---------------------------------------------------------------------------
 
+void clean_filename(sqlite3_context* context, int argc, sqlite3_value** argv);
 void decode_channel_id(sqlite3_context* context, int argc, sqlite3_value** argv);
 void discover_devices_broadcast(sqlite3* instance);
 void discover_devices_http(sqlite3* instance);
@@ -300,7 +302,7 @@ void add_recordingrule(sqlite3* instance, struct recordingrule const& recordingr
 			// Execute the query - no result set is expected
 			result = sqlite3_step(statement);
 			if(result == SQLITE_ROW) throw string_exception(__func__, ": unexpected result set returned from non-query");
-			if(result != SQLITE_DONE) throw sqlite_exception(result);
+			if(result != SQLITE_DONE) throw sqlite_exception(result, sqlite3_errmsg(instance));
 
 			sqlite3_finalize(statement);			// Finalize the SQLite statement
 		}
@@ -329,7 +331,7 @@ void add_recordingrule(sqlite3* instance, struct recordingrule const& recordingr
 			// Execute the query - no result set is expected
 			result = sqlite3_step(statement);
 			if(result == SQLITE_ROW) throw string_exception(__func__, ": unexpected result set returned from non-query");
-			if(result != SQLITE_DONE) throw sqlite_exception(result);
+			if(result != SQLITE_DONE) throw sqlite_exception(result, sqlite3_errmsg(instance));
 
 			sqlite3_finalize(statement);			// Finalize the SQLite statement
 		}
@@ -345,6 +347,44 @@ void add_recordingrule(sqlite3* instance, struct recordingrule const& recordingr
 
 	// Poke the recording engine(s) after a successful rule change; don't worry about exceptions
 	try_execute_non_query(instance, "select http_request(json_extract(data, '$.BaseURL') || '/recording_events.post?sync') from device where type = 'storage'");
+}
+
+//---------------------------------------------------------------------------
+// clean_filename
+//
+// SQLite scalar function to clean invalid chars from a file name
+//
+// Arguments:
+//
+//	context		- SQLite context object
+//	argc		- Number of supplied arguments
+//	argv		- Argument values
+
+void clean_filename(sqlite3_context* context, int argc, sqlite3_value** argv)
+{
+	if((argc != 1) || (argv[0] == nullptr)) return sqlite3_result_error(context, "invalid argument", -1);
+
+	// Null or zero-length input string results in a zero-length output string
+	const char* str = reinterpret_cast<const char*>(sqlite3_value_text(argv[0]));
+	if((str == nullptr) || (*str == 0)) return sqlite3_result_text(context, "", -1, SQLITE_STATIC);
+
+	// isinvalid_char
+	//
+	// Returns -1 if the specified character is invalid for a filename on Windows or Unix
+	auto isinvalid_char = [](char const& ch) -> bool { 
+
+		// Exclude characters with a value between 0 and 31 (inclusive) as well as various
+		// specific additional characters: [",<,>,|,:,*,?,\,/]
+		return (((static_cast<int>(ch) >= 0) && (static_cast<int>(ch) <= 31)) ||
+			(ch == '"') || (ch == '<') || (ch == '>') || (ch == '|') || (ch == ':') ||
+			(ch == '*') || (ch == '?') || (ch == '\\') || (ch == '/'));
+	};
+
+	std::string output(str);
+	output.erase(std::remove_if(output.begin(), output.end(), isinvalid_char), output.end());
+
+	// Return the generated string as a transient value (needs to be copied)
+	return sqlite3_result_text(context, output.c_str(), -1, SQLITE_TRANSIENT);
 }
 
 //---------------------------------------------------------------------------
@@ -451,7 +491,7 @@ void delete_recording(sqlite3* instance, char const* recordingid, bool rerecord)
 		// Execute the query; there shouldn't be any result set returned from it
 		result = sqlite3_step(statement);
 		if(result == SQLITE_ROW) throw string_exception(__func__, ": unexpected result set returned from non-query");
-		if(result != SQLITE_DONE) throw sqlite_exception(result);
+		if(result != SQLITE_DONE) throw sqlite_exception(result, sqlite3_errmsg(instance));
 
 		sqlite3_finalize(statement);			// Finalize the SQLite statement
 	}
@@ -498,7 +538,7 @@ void delete_recordingrule(sqlite3* instance, unsigned int recordingruleid)
 			// Execute the query; there shouldn't be any result set returned from it
 			result = sqlite3_step(statement);
 			if(result == SQLITE_ROW) throw string_exception(__func__, ": unexpected result set returned from non-query");
-			if(result != SQLITE_DONE) throw sqlite_exception(result);
+			if(result != SQLITE_DONE) throw sqlite_exception(result, sqlite3_errmsg(instance));
 
 			sqlite3_finalize(statement);			// Finalize the SQLite statement
 		}
@@ -627,7 +667,8 @@ void discover_devices_broadcast(sqlite3* instance)
 
 			// This is a non-query, it's not expected to return any rows
 			result = sqlite3_step(statement);
-			if(result != SQLITE_DONE) throw string_exception("non-query failed or returned an unexpected result set");
+			if(result == SQLITE_ROW) throw string_exception(__func__, ": unexpected result set returned from non-query");
+			if(result != SQLITE_DONE) throw sqlite_exception(result, sqlite3_errmsg(instance));
 
 			// Reset the prepared statement so that it can be executed again
 			result = sqlite3_reset(statement);
@@ -717,6 +758,9 @@ void discover_episodes(sqlite3* instance, bool& changed)
 
 			// Delete any entries in the main episode table that are no longer present in the data
 			if(execute_non_query(instance, "delete from episode where seriesid not in (select seriesid from discover_episode)") > 0) changed = true;
+
+			// Delete any entries in the main episode table that returned 'null' from the backend query
+			if(execute_non_query(instance, "delete from episode where seriesid in (select seriesid from discover_episode where data like 'null')") > 0) changed = true;
 
 			// Insert/replace entries in the main episode table that are new or different; watch for discovered rows with
 			// data set to 'null' - this happens when there is no episode information available for the series
@@ -1386,9 +1430,10 @@ void enumerate_expired_recordingruleids(sqlite3* instance, int expiry, enumerate
 //	channelid	- Channel to be enumerated
 //	starttime	- Starting time to be queried
 //	endtime		- Ending time to be queried
+//	prependnumber	- Flag to prepend the episode number to the episode name
 //	callback	- Callback function
 
-void enumerate_guideentries(sqlite3* instance, union channelid channelid, time_t starttime, time_t endtime, enumerate_guideentries_callback callback)
+void enumerate_guideentries(sqlite3* instance, union channelid channelid, time_t starttime, time_t endtime, bool prependnumber, enumerate_guideentries_callback callback)
 {
 	sqlite3_stmt*				statement;			// SQL statement to execute
 	int							result;				// Result from SQLite function
@@ -1409,13 +1454,13 @@ void enumerate_guideentries(sqlite3* instance, union channelid channelid, time_t
 		"cast(strftime('%Y', coalesce(json_extract(entry.value, '$.OriginalAirdate'), 0), 'unixepoch') as int) as year, "
 		"json_extract(entry.value, '$.ImageURL') as iconurl, "
 		"coalesce((select genretype from genremap where filter like json_extract(entry.value, '$.Filter[0]')), 0) as genretype, "
-		"(select group_concat(value) from json_each(json_extract(entry.value, '$.Filter'))) as genres, "
+		"json_extract(entry.value, '$.Filter[0]') as genres, "
 		"json_extract(entry.value, '$.OriginalAirdate') as originalairdate, "
 		"get_season_number(json_extract(entry.value, '$.EpisodeNumber')) as seriesnumber, "
 		"get_episode_number(json_extract(entry.value, '$.EpisodeNumber')) as episodenumber, "
-		"json_extract(entry.value, '$.EpisodeTitle') as episodename "
+		"case when ?1 then coalesce(json_extract(value, '$.EpisodeNumber') || ' - ', '') else '' end || json_extract(entry.value, '$.EpisodeTitle') as episodename "
 		"from deviceauth, "
-		"json_each(json_extract(nullif(http_request('http://api.hdhomerun.com/api/guide?DeviceAuth=' || coalesce(deviceauth.code, '') || '&Channel=' || decode_channel_id(?1) || '&Start=' || ?2), 'null'), '$[0].Guide')) as entry";
+		"json_each(json_extract(nullif(http_request('http://api.hdhomerun.com/api/guide?DeviceAuth=' || coalesce(deviceauth.code, '') || '&Channel=' || decode_channel_id(?2) || '&Start=' || ?3), 'null'), '$[0].Guide')) as entry";
 
 	result = sqlite3_prepare_v2(instance, sql, -1, &statement, nullptr);
 	if(result != SQLITE_OK) throw sqlite_exception(result, sqlite3_errmsg(instance));
@@ -1425,12 +1470,14 @@ void enumerate_guideentries(sqlite3* instance, union channelid channelid, time_t
 		while(starttime < endtime) {
 
 			// Bind the query parameters
-			result = sqlite3_bind_int(statement, 1, channelid.value);
-			if(result == SQLITE_OK) result = sqlite3_bind_int(statement, 2, static_cast<int>(starttime));
+			result = sqlite3_bind_int(statement, 1, (prependnumber) ? 1 : 0);
+			if(result == SQLITE_OK) result = sqlite3_bind_int(statement, 2, channelid.value);
+			if(result == SQLITE_OK) result = sqlite3_bind_int(statement, 3, static_cast<int>(starttime));
 			if(result != SQLITE_OK) throw sqlite_exception(result);
 
 			// Execute the SQL statement
 			result = sqlite3_step(statement);
+			if((result != SQLITE_DONE) && (result != SQLITE_ROW)) throw sqlite_exception(result, sqlite3_errmsg(instance));
 
 			// If no rows were returned from the query and the start time is still in the past,
 			// fast-forward it to the current time and try again.  Otherwise stop - no more data
@@ -2229,6 +2276,57 @@ int get_recording_count(sqlite3* instance)
 }
 
 //---------------------------------------------------------------------------
+// get_recording_filename
+//
+// Generates the filename for a recording
+//
+// Arguments:
+//
+//	instance		- Database instance
+//	recordingid		- Recording identifier (command url)
+
+std::string get_recording_filename(sqlite3* instance, char const* recordingid)
+{
+	sqlite3_stmt*				statement;				// Database query statement
+	std::string					filename;				// Generated file name
+	int							result;					// Result from SQLite function call
+
+	if((instance == nullptr) || (recordingid == nullptr)) return filename;
+
+	// Prepare a scalar result query to generate the file name of the recording MPG file
+	//
+	// FORMAT: {DisplayGroupTitle}/{Title} {EpisodeNumber} {OriginalAirDate} [{StartTime}]
+	auto sql = "select rtrim(clean_filename(json_extract(value, '$.DisplayGroupTitle')), ' .') || '/' || "
+		"clean_filename(json_extract(value, '$.Title')) || ' ' || "
+		"coalesce(json_extract(value, '$.EpisodeNumber') || ' ', '') || "
+		"coalesce(strftime('%Y%m%d', datetime(json_extract(value, '$.OriginalAirdate'), 'unixepoch')) || ' ', '') || "
+		"'[' || strftime('%Y%m%d-%H%M', datetime(json_extract(value, '$.StartTime'), 'unixepoch')) || ']' as filename "
+		"from recording, json_each(recording.data) where json_extract(value, '$.CmdURL') like ?1 limit 1";
+
+	result = sqlite3_prepare_v2(instance, sql, -1, &statement, nullptr);
+	if(result != SQLITE_OK) throw sqlite_exception(result, sqlite3_errmsg(instance));
+
+	try {
+
+		// Bind the query parameters
+		result = sqlite3_bind_text(statement, 1, recordingid, -1, SQLITE_STATIC);
+		if(result != SQLITE_OK) throw sqlite_exception(result);
+		
+		// Execute the scalar query
+		result = sqlite3_step(statement);
+
+		// There should be a single SQLITE_ROW returned from the initial step
+		if(result == SQLITE_ROW) filename.assign(reinterpret_cast<char const*>(sqlite3_column_text(statement, 0)));
+		else if(result != SQLITE_DONE) throw sqlite_exception(result, sqlite3_errmsg(instance));
+
+		sqlite3_finalize(statement);
+		return filename;
+	}
+
+	catch(...) { sqlite3_finalize(statement); throw; }
+}
+
+//---------------------------------------------------------------------------
 // get_recording_lastposition
 //
 // Gets the last played position for a specific recording
@@ -2671,7 +2769,7 @@ void modify_recordingrule(sqlite3* instance, struct recordingrule const& recordi
 			// Execute the query - no result set is expected
 			result = sqlite3_step(statement);
 			if(result == SQLITE_ROW) throw string_exception(__func__, ": unexpected result set returned from non-query");
-			if(result != SQLITE_DONE) throw sqlite_exception(result);
+			if(result != SQLITE_DONE) throw sqlite_exception(result, sqlite3_errmsg(instance));
 
 			sqlite3_finalize(statement);			// Finalize the SQLite statement
 		}
@@ -2701,7 +2799,7 @@ void modify_recordingrule(sqlite3* instance, struct recordingrule const& recordi
 			// Execute the query - no result set is expected
 			result = sqlite3_step(statement);
 			if(result == SQLITE_ROW) throw string_exception(__func__, ": unexpected result set returned from non-query");
-			if(result != SQLITE_DONE) throw sqlite_exception(result);
+			if(result != SQLITE_DONE) throw sqlite_exception(result, sqlite3_errmsg(instance));
 
 			sqlite3_finalize(statement);			// Finalize the SQLite statement
 		}
@@ -2789,6 +2887,11 @@ sqlite3* open_database(char const* connstring, int flags, bool initialize)
 		// switch the database to write-ahead logging
 		//
 		execute_non_query(instance, "pragma journal_mode=wal");
+
+		// scalar function: clean_filename
+		//
+		result = sqlite3_create_function_v2(instance, "clean_filename", 1, SQLITE_UTF8, nullptr, clean_filename, nullptr, nullptr, nullptr);
+		if(result != SQLITE_OK) throw sqlite_exception(result);
 
 		// scalar function: decode_channel_id
 		//
@@ -3002,7 +3105,7 @@ void set_recording_lastposition(sqlite3* instance, char const* recordingid, int 
 		// Execute the query; there shouldn't be any result set returned from it
 		result = sqlite3_step(statement);
 		if(result == SQLITE_ROW) throw string_exception(__func__, ": unexpected result set returned from non-query");
-		if(result != SQLITE_DONE) throw sqlite_exception(result);
+		if(result != SQLITE_DONE) throw sqlite_exception(result, sqlite3_errmsg(instance));
 
 		sqlite3_finalize(statement);			// Finalize the SQLite statement
 	}

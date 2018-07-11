@@ -1,5 +1,5 @@
 //-----------------------------------------------------------------------------
-// Copyright (c) 2017 Michael G. Brehm
+// Copyright (c) 2018 Michael G. Brehm
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -25,10 +25,6 @@
 
 #pragma warning(push, 4)
 
-// Link with RPC Runtime
-//
-#pragma comment(lib, "rpcrt4.lib")
-
 //---------------------------------------------------------------------------
 // uuid_generate
 //
@@ -41,7 +37,7 @@
 void uuid_generate(uuid_t& out)
 {
 	memset(&out, 0, sizeof(uuid_t));
-	UuidCreate(&out);
+	CoCreateGuid(&out);
 }
 
 //---------------------------------------------------------------------------
@@ -57,17 +53,12 @@ void uuid_generate(uuid_t& out)
 
 void uuid_unparse(uuid_t const& u, char* out)
 {
-	RPC_CSTR	uuidstr = nullptr;			// String representation
+	if(out == nullptr) return;
 
-	if(out == nullptr) return;				// Bad output pointer
-	*out = '\0';							// Set to null string
-
-	// Use the Windows RPC runtime to convert the UUID into a string
-	if(UuidToStringA(&u, &uuidstr) == RPC_S_OK) {
-		
-		strcpy(out, reinterpret_cast<char const*>(uuidstr));
-		RpcStringFreeA(&uuidstr);
-	}
+	// UuidToStringA is only available on WINAPI_PARTITION_DESKTOP, this code is also
+	// now used for the UWP/Store version of the library - just use sprintf()
+	sprintf(out, "%08lx-%04hx-%04hx-%02hhx%02hhx-%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx", u.Data1, u.Data2, u.Data3, 
+		u.Data4[0], u.Data4[1], u.Data4[2], u.Data4[3], u.Data4[4], u.Data4[5], u.Data4[6], u.Data4[7]);
 }
 
 //-----------------------------------------------------------------------------

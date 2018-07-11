@@ -1,5 +1,5 @@
 //---------------------------------------------------------------------------
-// Copyright (c) 2017 Michael G. Brehm
+// Copyright (c) 2018 Michael G. Brehm
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -277,22 +277,13 @@ struct addon_settings {
 // Kodi add-on callbacks
 static std::unique_ptr<ADDON::CHelper_libXBMC_addon> g_addon;
 
-// g_addon_lock
-//
-// Synchronization object to serialize access to addon callbacks
-static std::mutex g_addon_lock;
-
-// g_addon_refs
-//
-// Reference count for calls to ADDON_Create/ADDON_Destroy
-static int g_addon_refs = 0;
-
 // g_capabilities (const)
 //
 // PVR implementation capability flags
 static const PVR_ADDON_CAPABILITIES g_capabilities = {
 
 	true,			// bSupportsEPG
+	false,			// bSupportsEPGEdl
 	true,			// bSupportsTV
 	false,			// bSupportsRadio
 	true,			// bSupportsRecordings
@@ -322,6 +313,11 @@ static std::shared_ptr<connectionpool> g_connpool;
 //
 // DVR stream buffer instance
 static std::unique_ptr<dvrstream> g_dvrstream;
+
+// g_epgenabled
+//
+// Flag indicating if EPG access is enabled for the process
+static bool g_epgenabled = true;
 
 // g_epgmaxtime
 //
@@ -604,6 +600,11 @@ static void discover_devices_task(scalar_condition<bool> const& cancel)
 			g_scheduler.remove(discover_recordings_task);
 			discover_recordings_task(cancel);
 		}
+
+		// Re-enable access to the EPG if it had been disabled due to multiple failure(s) accessing
+		// a channel EPG.  The idea here is to prevent unauthorized clients from slamming the backend
+		// services for no reason -- see the GetEPGForChannel() function.
+		g_epgenabled = true;
 	}
 
 	catch(std::exception& ex) { handle_stdexception(__func__, ex); }
@@ -1203,6 +1204,115 @@ static int ringbuffersize_enum_to_bytes(int nvalue)
 	return (4 MiB);					// 4 Megabytes = default
 }
 
+// try_getepgforchannel
+//
+// Request the EPG for a channel from the backend
+static bool try_getepgforchannel(ADDON_HANDLE handle, PVR_CHANNEL const& channel, time_t start, time_t end)
+{
+	assert(g_pvr);
+	assert(handle != nullptr);
+
+	// Retrieve the channel identifier from the PVR_CHANNEL structure
+	union channelid channelid;
+	channelid.value = channel.iUniqueId;
+
+	//
+	// NOTE: This does not cache all of the enumerated guide data locally before
+	// transferring it over to Kodi, it's done realtime to reduce the heap footprint
+	// and allow Kodi to process the entries as they are generated
+	//
+
+	try {
+
+		// Create a copy of the current addon settings structure
+		struct addon_settings settings = copy_settings();
+
+		// Pull a database connection out from the connection pool
+		connectionpool::handle dbhandle(g_connpool);
+
+		// Log the request if verbose_disovery_logging has been enabled
+		if(settings.verbose_transfer_logging) {
+
+			char strstart[24] = {'\0'};				// Buffer for converted time_t
+			char strend[24] = {'\0'};				// Buffer for converted time_t
+
+			// Convert both time_t values into "YYYY-MM-DDTHH:MM:SSZ"
+			strftime(strstart, std::extent<decltype(strstart)>::value, "%FT%TZ", gmtime(&start));
+			strftime(strend, std::extent<decltype(strend)>::value, "%FT%TZ", gmtime(&end));
+
+			log_notice(__func__, ": Guide data requested for channel ", channel.strChannelName, ": start=", strstart, " end=", strend);
+		}
+
+		// Enumerate all of the guide entries in the database for this channel and time frame
+		enumerate_guideentries(dbhandle, channelid, start, end, settings.prepend_episode_numbers_in_epg, [&](struct guideentry const& item) -> void {
+
+			EPG_TAG	epgtag;										// EPG_TAG to be transferred to Kodi
+			memset(&epgtag, 0, sizeof(EPG_TAG));				// Initialize the structure
+
+			// iUniqueBroadcastId (required)
+			epgtag.iUniqueBroadcastId = static_cast<unsigned int>(item.starttime);
+
+			// iUniqueChannelId (required)
+			epgtag.iUniqueChannelId = item.channelid;
+
+			// strTitle (required)
+			if(item.title == nullptr) return;
+			epgtag.strTitle = item.title;
+
+			// startTime (required)
+			epgtag.startTime = item.starttime;
+
+			// endTime (required)
+			epgtag.endTime = item.endtime;
+
+			// strPlot
+			if(item.synopsis != nullptr) epgtag.strPlot = item.synopsis;
+
+			// iYear
+			epgtag.iYear = item.year;
+
+			// strIconPath
+			if(item.iconurl != nullptr) epgtag.strIconPath = item.iconurl;
+
+			// iGenreType
+			epgtag.iGenreType = (settings.use_backend_genre_strings) ? EPG_GENRE_USE_STRING : item.genretype;
+
+			// strGenreDescription
+			if(settings.use_backend_genre_strings) epgtag.strGenreDescription = item.genres;
+
+			// firstAired
+			epgtag.firstAired = item.originalairdate;
+
+			// iSeriesNumber
+			epgtag.iSeriesNumber = item.seriesnumber;
+
+			// iEpisodeNumber
+			epgtag.iEpisodeNumber = item.episodenumber;
+
+			// iEpisodePartNumber
+			epgtag.iEpisodePartNumber = -1;
+
+			// strEpisodeName
+			if(item.episodename != nullptr) epgtag.strEpisodeName = item.episodename;
+
+			// iFlags
+			epgtag.iFlags = EPG_TAG_FLAG_IS_SERIES;
+
+			// strSeriesLink
+			epgtag.strSeriesLink = item.seriesid;
+
+			// Transfer the EPG_TAG structure over over to Kodi and log if enabled
+			g_pvr->TransferEpgEntry(handle, &epgtag);
+			if(settings.verbose_transfer_logging) log_transfer_epgtag(epgtag);
+		});
+	}
+	
+	catch(std::exception& ex) { return handle_stdexception(__func__, ex, false); }
+	catch(...) { return handle_generalexception(__func__, false); }
+
+	return true;
+}
+
 //---------------------------------------------------------------------------
 // KODI ADDON ENTRY POINTS
 //---------------------------------------------------------------------------
@@ -1226,16 +1336,6 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 	scalar_condition<bool>	cancel{false};					// Dummy cancellation flag for tasks
 
 	if((handle == nullptr) || (props == nullptr)) return ADDON_STATUS::ADDON_STATUS_PERMANENT_FAILURE;
-
-	// Kodi 18 "Leia" allows ADDON_Create to be called multiple times from multiple threads
-	// when the addon is being installed; work around this with a mutex and a reference counter
-	std::unique_lock<std::mutex> lock(g_addon_lock);
-	if((++g_addon_refs) > 1) {
-
-		assert(g_addon);
-		log_notice(__func__, ": warning: bypassing addon initialization (refs = ", g_addon_refs, ")");
-		return ADDON_STATUS::ADDON_STATUS_OK;
-	}
 
 	// Copy anything relevant from the provided parameters
 	PVR_PROPERTIES* pvrprops = reinterpret_cast<PVR_PROPERTIES*>(props);
@@ -1485,13 +1585,6 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 
 void ADDON_Destroy(void)
 {
-	// Kodi 18 "Leia" allows ADDON_Destroy to be called multiple times from multiple threads
-	// when the addon is being installed; work around this with a mutex and a reference counter
-	std::unique_lock<std::mutex> lock(g_addon_lock);
-	if((--g_addon_refs) > 0) return log_notice(__func__, ": warning: bypassing addon termination (refs = ", g_addon_refs, ")");
-
-	assert(g_addon_refs == 0);				// Verify this is only happening one time
-
 	// Throw a message out to the Kodi log indicating that the add-on is being unloaded
 	log_notice(__func__, ": ", VERSION_PRODUCTNAME_ANSI, " v", VERSION_VERSION3_ANSI, " unloading");
 
@@ -1950,7 +2043,7 @@ char const* GetBackendVersion(void)
 
 char const* GetConnectionString(void)
 {
-	return "my.hdhomerun.com";
+	return "api.hdhomerun.com";
 }
 
 //---------------------------------------------------------------------------
@@ -2233,7 +2326,12 @@ PVR_ERROR CallMenuHook(PVR_MENUHOOK const& menuhook, PVR_MENUHOOK_DATA const& it
 //---------------------------------------------------------------------------
 // GetEPGForChannel
 //
-// Request the EPG for a channel from the backend
+// Request the EPG for a channel from the backend.  If the operation fails, this
+// will re-execute a device discovery inline (and therefore possibly a lineup and
+// recording discovery) in order to refresh the device authorization codes.  If the
+// operation fails a second time, the function will be disabled until the next
+// device discovery -- this was put in place to limit the number of times that an 
+// unauthorized client can request EPG data from the backend services.
 //
 // Arguments:
 //
@@ -2244,109 +2342,31 @@ PVR_ERROR CallMenuHook(PVR_MENUHOOK const& menuhook, PVR_MENUHOOK_DATA const& it
 
 PVR_ERROR GetEPGForChannel(ADDON_HANDLE handle, PVR_CHANNEL const& channel, time_t start, time_t end)
 {
-	assert(g_pvr);
+	bool		cancel = false;				// Unused cancellation flag for discover_devices_task
 
 	if(handle == nullptr) return PVR_ERROR::PVR_ERROR_INVALID_PARAMETERS;
 
-	// Retrieve the channel identifier from the PVR_CHANNEL structure
-	union channelid channelid;
-	channelid.value = channel.iUniqueId;
+	// Check if the EPG function has been disabled due to failure(s)
+	if(!g_epgenabled) return PVR_ERROR::PVR_ERROR_FAILED;
 
-	//
-	// NOTE: This does not cache all of the enumerated guide data locally before
-	// transferring it over to Kodi, it's done realtime to reduce the heap footprint
-	// and allow Kodi to process the entries as they are generated
-	//
+	// Try to get the EPG data for the channel, if successful the operation is complete
+	bool result = try_getepgforchannel(handle, channel, start, end);
+	if(result == true) return PVR_ERROR::PVR_ERROR_NO_ERROR;
 
-	try {
+	// If the operation failed, re-execute a device discovery in case the deviceauth code(s) are stale
+	log_notice(__func__, ": failed to retrieve EPG data for channel -- execute device discovery now");
+	g_scheduler.remove(discover_devices_task);
+	discover_devices_task(cancel);
 
-		// Create a copy of the current addon settings structure
-		struct addon_settings settings = copy_settings();
+	// Try the operation again after the device discovery task has completed
+	result = try_getepgforchannel(handle, channel, start, end);
+	if(result == true) return PVR_ERROR::PVR_ERROR_NO_ERROR;
 
-		// Pull a database connection out from the connection pool
-		connectionpool::handle dbhandle(g_connpool);
-
-		// Log the request if verbose_disovery_logging has been enabled
-		if(settings.verbose_transfer_logging) {
-
-			char strstart[24] = {'\0'};				// Buffer for converted time_t
-			char strend[24] = {'\0'};				// Buffer for converted time_t
-
-			// Convert both time_t values into "YYYY-MM-DDTHH:MM:SSZ"
-			strftime(strstart, std::extent<decltype(strstart)>::value, "%FT%TZ", gmtime(&start));
-			strftime(strend, std::extent<decltype(strend)>::value, "%FT%TZ", gmtime(&end));
-
-			log_notice(__func__, ": Guide data requested for channel ", channel.strChannelName, ": start=", strstart, " end=", strend);
-		}
-
-		// Enumerate all of the guide entries in the database for this channel and time frame
-		enumerate_guideentries(dbhandle, channelid, start, end, settings.prepend_episode_numbers_in_epg, [&](struct guideentry const& item) -> void {
-
-			EPG_TAG	epgtag;										// EPG_TAG to be transferred to Kodi
-			memset(&epgtag, 0, sizeof(EPG_TAG));				// Initialize the structure
-
-			// iUniqueBroadcastId (required)
-			epgtag.iUniqueBroadcastId = static_cast<unsigned int>(item.starttime);
-
-			// iUniqueChannelId (required)
-			epgtag.iUniqueChannelId = item.channelid;
-
-			// strTitle (required)
-			if(item.title == nullptr) return;
-			epgtag.strTitle = item.title;
-
-			// startTime (required)
-			epgtag.startTime = item.starttime;
-
-			// endTime (required)
-			epgtag.endTime = item.endtime;
-
-			// strPlot
-			if(item.synopsis != nullptr) epgtag.strPlot = item.synopsis;
-
-			// iYear
-			epgtag.iYear = item.year;
-
-			// strIconPath
-			if(item.iconurl != nullptr) epgtag.strIconPath = item.iconurl;
-
-			// iGenreType
-			epgtag.iGenreType = (settings.use_backend_genre_strings) ? EPG_GENRE_USE_STRING : item.genretype;
-
-			// strGenreDescription
-			if(settings.use_backend_genre_strings) epgtag.strGenreDescription = item.genres;
-
-			// firstAired
-			epgtag.firstAired = item.originalairdate;
-
-			// iSeriesNumber
-			epgtag.iSeriesNumber = item.seriesnumber;
-
-			// iEpisodeNumber
-			epgtag.iEpisodeNumber = item.episodenumber;
-
-			// iEpisodePartNumber
-			epgtag.iEpisodePartNumber = -1;
-
-			// strEpisodeName
-			if(item.episodename != nullptr) epgtag.strEpisodeName = item.episodename;
-
-			// iFlags
-			epgtag.iFlags = EPG_TAG_FLAG_IS_SERIES;
-
-			// strSeriesLink
-			epgtag.strSeriesLink = item.seriesid;
-
-			// Transfer the EPG_TAG structure over to Kodi
-			g_pvr->TransferEpgEntry(handle, &epgtag);
-			if(settings.verbose_transfer_logging) log_transfer_epgtag(epgtag);
-		});
-	}
-	
-	catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
-	catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
-
-	return PVR_ERROR::PVR_ERROR_NO_ERROR;
+	// If the operation failed a second time, temporarily disable the EPG functionality.  This flag
+	// will be cleared after the next successful device discovery completes.
+	log_error(__func__, ": Multiple failures were encountered accessing EPG data; EPG functionality is temporarily disabled");
+	g_epgenabled = false;
+	return PVR_ERROR::PVR_ERROR_FAILED;
 }
 
 //---------------------------------------------------------------------------
@@ -2375,6 +2395,22 @@ PVR_ERROR IsEPGTagRecordable(EPG_TAG const* /*tag*/, bool* /*recordable*/)
 //	playable	- Flag indicating if the EPG tag can be played
 
 PVR_ERROR IsEPGTagPlayable(EPG_TAG const* /*tag*/, bool* /*playable*/)
+{
+	return PVR_ERROR_NOT_IMPLEMENTED;
+}
+
+//---------------------------------------------------------------------------
+// GetEPGTagEdl
+//
+// Retrieve the edit decision list (EDL) of an EPG tag on the backend
+//
+// Arguments:
+//
+//	tag			- EPG tag
+//	edl			- The function has to write the EDL list into this array
+//	count		- The maximum size of the EDL, out: the actual size of the EDL
+
+PVR_ERROR GetEPGTagEdl(EPG_TAG const* /*tag*/, PVR_EDL_ENTRY /*edl*/[], int* /*count*/)
 {
 	return PVR_ERROR_NOT_IMPLEMENTED;
 }
@@ -3765,6 +3801,22 @@ PVR_ERROR GetRecordingStreamProperties(PVR_RECORDING const* /*recording*/, PVR_N
 PVR_ERROR GetStreamProperties(PVR_STREAM_PROPERTIES* properties)
 {
 	if(properties == nullptr) return PVR_ERROR::PVR_ERROR_INVALID_PARAMETERS;
+
+	return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
+}
+
+//---------------------------------------------------------------------------
+// GetStreamReadChunkSize
+//
+// Obtain the chunk size to use when reading streams
+//
+// Arguments:
+//
+//	properties	- The properties of the currently playing stream
+
+PVR_ERROR GetStreamReadChunkSize(int* chunksize)
+{
+	if(chunksize == nullptr) return PVR_ERROR::PVR_ERROR_INVALID_PARAMETERS;
 
 	return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
 }

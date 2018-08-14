@@ -33,7 +33,7 @@ msgid "EDL"
 msgstr ""
 
 msgctxt "#30100"
-msgid "Pause discovery while streaming Live TV channels"
+msgid "Pause discovery tasks while streaming"
 msgstr ""
 
 msgctxt "#30101"
@@ -85,15 +85,11 @@ msgid "Startup discovery task delay (seconds)"
 msgstr ""
 
 msgctxt "#30114"
-msgid "DVR stream read operation minimum size"
+msgid "DVR stream read chunk size"
 msgstr ""
 
 msgctxt "#30115"
 msgid "DVR stream ring buffer size"
-msgstr ""
-
-msgctxt "#30116"
-msgid "DVR stream read operation timeout (milliseconds)"
 msgstr ""
 
 msgctxt "#30117"
@@ -122,14 +118,6 @@ msgstr ""
 
 msgctxt "#30123"
 msgid "Trigger recording discovery immediately after playback"
-msgstr ""
-
-msgctxt "#30124"
-msgid "Enable verbose data transfer logs"
-msgstr ""
-
-msgctxt "#30125"
-msgid "Disable reporting of real-time MPEG-TS streams"
 msgstr ""
 
 msgctxt "#30126"
@@ -246,6 +234,10 @@ msgstr ""
 
 msgctxt "#30228"
 msgid "16 MiB"
+msgstr ""
+
+msgctxt "#30229"
+msgid "32 KiB"
 msgstr ""
 
 msgctxt "#30301"

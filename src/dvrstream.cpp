@@ -25,13 +25,67 @@
 
 #include <algorithm>
 #include <assert.h>
-#include <chrono>
 #include <string.h>
 
 #include "align.h"
+#include "http_exception.h"
 #include "string_exception.h"
 
 #pragma warning(push, 4)
+
+// dvrstream::DEFAULT_READ_MINCOUNT (static)
+//
+// Default minimum amount of data to return from a read request
+size_t const dvrstream::DEFAULT_READ_MINCOUNT = (4 KiB);
+
+// dvrstream::DEFAULT_RINGBUFFER_SIZE (static)
+//
+// Default ring buffer size, in bytes
+size_t const dvrstream::DEFAULT_RINGBUFFER_SIZE = (1 MiB);
+
+// dvrstream::MAX_STREAM_LENGTH (static)
+//
+// Maximum allowable stream length; indicates a real-time stream
+long long const dvrstream::MAX_STREAM_LENGTH = std::numeric_limits<long long>::max();
+
+// dvrstream::MPEGTS_PACKET_LENGTH (static)
+//
+// Length of a single mpeg-ts data packet
+size_t const dvrstream::MPEGTS_PACKET_LENGTH = 188;
+	
+//---------------------------------------------------------------------------
+// decode_pcr90khz
+//
+// Decodes a PCR (Program Clock Reference) value at the 90KHz clock
+//
+// Arguments:
+//
+//	ptr		- Pointer to the data to be decoded
+
+inline uint64_t decode_pcr90khz(uint8_t const* ptr)
+{
+	assert(ptr != nullptr);
+
+	// The 90KHz clock is encoded as a single 33 bit value at the start of the data
+	return (static_cast<uint64_t>(ptr[0]) << 25) | (static_cast<uint32_t>(ptr[1]) << 17) | (static_cast<uint32_t>(ptr[2]) << 9) | (static_cast<uint16_t>(ptr[3]) << 1) | (ptr[4] >> 7);
+}
+
+//---------------------------------------------------------------------------
+// decode_pcr27mhz
+//
+// Decodes a PCR (Program Clock Reference) value at the 27MHz clock
+//
+// Arguments:
+//
+//	ptr		- Pointer to the data to be decoded
+
+inline uint64_t decode_pcr27mhz(uint8_t const* ptr)
+{
+	assert(ptr != nullptr);
+
+	// The 27Mhz clock is decoded by multiplying the 33-bit 90KHz base clock by 300 and adding the 9-bit extension
+	return (decode_pcr90khz(ptr) * 300) + (static_cast<uint16_t>(ptr[4] & 0x01) << 8) + ptr[5];
+}
 
 //---------------------------------------------------------------------------
 // read_be8
@@ -85,31 +139,6 @@ inline uint32_t read_be32(uint8_t const* ptr)
 	return val;
 }
 
-// dvrstream::DEFAULT_READ_MIN (static)
-//
-// Default minimum amount of data to return from a read request
-size_t const dvrstream::DEFAULT_READ_MINCOUNT = (1 KiB);
-
-// dvrstream::DEFAULT_READ_TIMEOUT_MS (static)
-//
-// Default amount of time for a read operation to succeed
-unsigned int const dvrstream::DEFAULT_READ_TIMEOUT_MS = 2500;
-
-// dvrstream::DEFAULT_RINGBUFFER_SIZE (static)
-//
-// Default ring buffer size, in bytes
-size_t const dvrstream::DEFAULT_RINGBUFFER_SIZE = (4 MiB);
-
-// dvrstream::MAX_STREAM_LENGTH (static)
-//
-// Maximum allowable stream length; indicates a real-time stream
-long long const dvrstream::MAX_STREAM_LENGTH = std::numeric_limits<long long>::max();
-
-// dvrstream::MPEGTS_PACKET_LENGTH (static)
-//
-// Length of a single mpeg-ts data packet
-size_t const dvrstream::MPEGTS_PACKET_LENGTH = 188;
-	
 //---------------------------------------------------------------------------
 // dvrstream Constructor (private)
 //
@@ -118,60 +147,60 @@ size_t const dvrstream::MPEGTS_PACKET_LENGTH = 188;
 //	url				- URL of the stream to be opened
 //	buffersize		- Ring buffer size, in bytes
 //	readmincount	- Minimum bytes to return from a read operation
-//	readtimeout		- Read operation timeout, in millseconds
 
-dvrstream::dvrstream(char const* url, size_t buffersize, size_t readmincount, unsigned int readtimeout) :
+dvrstream::dvrstream(char const* url, size_t buffersize, size_t readmincount) :
 	m_readmincount(std::max(align::down(readmincount, MPEGTS_PACKET_LENGTH), MPEGTS_PACKET_LENGTH)),
-	m_readtimeout(std::max(1U, readtimeout)), m_buffersize(align::up(buffersize, 65536))
+	m_buffersize(align::up(buffersize, 65536))
 {
-	// m_readmincount is aligned downward to a mpeg-ts packet boundary with a minimum of one packet
-	// m_readtimeout has a minimum value of one millisecond
-	// m_buffersize is aligned upward to a 64KiB boundary
-
 	if(url == nullptr) throw std::invalid_argument("url");
 
 	// Allocate the ring buffer using the 64KiB upward-aligned buffer size
 	m_buffer = std::unique_ptr<uint8_t[]>(new uint8_t[m_buffersize]);
 	if(!m_buffer) throw std::bad_alloc();
 
-	// Initialize the CURL error string buffer to all nulls before starting up
-	memset(m_curlerr, 0, CURL_ERROR_SIZE);
-
-	// Create and initialize the curl easy interface object
-	m_curl = curl_easy_init();
-	if(m_curl == nullptr) throw string_exception(__func__, ": curl_easy_init() failed");
+	// Create and initialize the curl multi interface object
+	m_curlm = curl_multi_init();
+	if(m_curlm == nullptr) throw string_exception(__func__, ": curl_multi_init() failed");
 
 	try {
 
-		// Set the general options for the easy interface curl object
-		CURLcode curlresult = curl_easy_setopt(m_curl, CURLOPT_URL, url);
-		if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_NOSIGNAL, 1L);
-		if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_HEADERFUNCTION, &dvrstream::curl_responseheaders);
-		if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_HEADERDATA, this);
-		if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_WRITEFUNCTION, &dvrstream::curl_write);
-		if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_WRITEDATA, this);
-		if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_XFERINFOFUNCTION, &dvrstream::curl_transfercontrol);
-		if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_XFERINFODATA, this);
-		if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_NOPROGRESS, 0L);
-		if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_ERRORBUFFER, m_curlerr);
-		if(curlresult != CURLE_OK) throw string_exception(__func__, ": curl_easy_setopt() failed");
+		// Create and initialize the curl easy interface object
+		m_curl = curl_easy_init();
+		if(m_curl == nullptr) throw string_exception(__func__, ": curl_easy_init() failed");
 
-		// Create a new worker thread on which to perform the transfer operations and wait for it to start
-		m_worker = std::thread(&dvrstream::curl_transfer_func, this, 0LL);
-		m_started.wait_until_equals(true);
+		try {
 
-		// If the transfer thread failed to initiate the data transfer throw an exception
-		if((m_curlresult != CURLE_OK) && (m_curlresult != CURLE_ABORTED_BY_CALLBACK)) {
-		
-			m_stop.store(true);				// Signal worker to stop (shouldn't be running)
-			m_worker.join();				// Wait for the worker thread to stop
+			// Set the options for the easy interface curl handle
+			CURLcode curlresult = curl_easy_setopt(m_curl, CURLOPT_URL, url);
+			if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_NOSIGNAL, 1L);
+			if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_HEADERFUNCTION, &dvrstream::curl_responseheaders);
+			if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_HEADERDATA, this);
+			if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_WRITEFUNCTION, &dvrstream::curl_write);
+			if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_WRITEDATA, this);
+			if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_NOPROGRESS, 0L);
+			if(curlresult == CURLE_OK) curlresult = curl_easy_setopt(m_curl, CURLOPT_RANGE, "0-");
+			if(curlresult != CURLE_OK) throw string_exception(__func__, ": curl_easy_setopt() failed: ", curl_easy_strerror(curlresult));
 
-			throw string_exception(__func__, ": failed to open url ", url, ": ", m_curlerr);
+			// Attempt to add the easy handle to the multi handle
+			CURLMcode curlmresult = curl_multi_add_handle(m_curlm, m_curl);
+			if(curlmresult != CURLM_OK) throw string_exception(__func__, ": curl_multi_add_handle() failed: ", curl_multi_strerror(curlmresult));
+
+			try {
+
+				// Attempt to begin the data transfer and wait for the HTTP headers to be processed
+				if(!transfer_until([&]() -> bool { return m_headers == true; })) throw string_exception(__func__, ": failed to receive HTTP response headers");
+			}
+
+			// Remove the easy handle from the multi interface on exception
+			catch(...) { curl_multi_remove_handle(m_curlm, m_curl); throw; }
 		}
+
+		// Clean up and destroy the easy handle on exception
+		catch(...) { curl_easy_cleanup(m_curl); throw; }
 	}
 
-	// Clean up the CURL easy interface object on exception
-	catch(...) { curl_easy_cleanup(m_curl); throw; }
+	// Clean up and destroy the multi handle on exception
+	catch(...) { curl_multi_cleanup(m_curlm); throw; }
 }
 
 //---------------------------------------------------------------------------
@@ -179,12 +208,7 @@ dvrstream::dvrstream(char const* url, size_t buffersize, size_t readmincount, un
 
 dvrstream::~dvrstream()
 {
-	// Close out the data transfer if it's still active
-	try { close(); }
-	catch(...) { /* DO NOTHING */ }
-
-	// Clean up the curl easy interface object
-	curl_easy_cleanup(m_curl);
+	close();
 }
 
 //---------------------------------------------------------------------------
@@ -198,7 +222,6 @@ dvrstream::~dvrstream()
 
 bool dvrstream::canseek(void) const
 {
-	std::unique_lock<std::mutex> lock(m_lock);
 	return m_canseek;
 }
 
@@ -213,10 +236,37 @@ bool dvrstream::canseek(void) const
 
 void dvrstream::close(void)
 {
-	if(!m_worker.joinable()) return;	// Thread is not running
+	// Remove the easy handle from the multi handle and close them both out
+	if((m_curlm != nullptr) && (m_curl != nullptr)) curl_multi_remove_handle(m_curlm, m_curl);
+	if(m_curl != nullptr) curl_easy_cleanup(m_curl);
+	if(m_curlm != nullptr) curl_multi_cleanup(m_curlm);
 
-	m_stop.store(true);					// Signal worker thread to stop
-	m_worker.join();					// Wait for it to actually stop
+	m_curl = nullptr;				// Reset easy handle to null
+	m_curlm = nullptr;				// Reset multi handle to null
+}
+
+//---------------------------------------------------------------------------
+// dvrstream::currenttime
+//
+// Gets the current playback time based on the presentation timestamps
+//
+// Arguments:
+//
+//	NONE
+
+time_t dvrstream::currenttime(void) const
+{
+	// If either of the presentation timestamps are missing, report zero
+	if((m_startpts == 0) || (m_currentpts == 0)) return 0;
+
+	// If the current presentation timestamp is before the start, report zero
+	if(m_currentpts < m_startpts) return 0;
+
+	// Calculate the current playback time via the delta between the current
+	// and starting presentation timestamp values (90KHz periods)
+	uint64_t delta = (m_currentpts - m_startpts) / 90000;
+	assert(delta <= static_cast<uint64_t>(std::numeric_limits<time_t>::max()));
+	return m_starttime + static_cast<time_t>(delta);
 }
 
 //---------------------------------------------------------------------------
@@ -230,7 +280,7 @@ void dvrstream::close(void)
 
 std::unique_ptr<dvrstream> dvrstream::create(char const* url)
 {
-	return create(url, DEFAULT_RINGBUFFER_SIZE, DEFAULT_READ_MINCOUNT, DEFAULT_READ_TIMEOUT_MS);
+	return create(url, DEFAULT_RINGBUFFER_SIZE, DEFAULT_READ_MINCOUNT);
 }
 
 //---------------------------------------------------------------------------
@@ -245,7 +295,7 @@ std::unique_ptr<dvrstream> dvrstream::create(char const* url)
 
 std::unique_ptr<dvrstream> dvrstream::create(char const* url, size_t buffersize)
 {
-	return create(url, buffersize, DEFAULT_READ_MINCOUNT, DEFAULT_READ_TIMEOUT_MS);
+	return create(url, buffersize, DEFAULT_READ_MINCOUNT);
 }
 
 //---------------------------------------------------------------------------
@@ -261,24 +311,7 @@ std::unique_ptr<dvrstream> dvrstream::create(char const* url, size_t buffersize)
 
 std::unique_ptr<dvrstream> dvrstream::create(char const* url, size_t buffersize, size_t readmincount)
 {
-	return create(url, buffersize, readmincount, DEFAULT_READ_TIMEOUT_MS);
-}
-
-//---------------------------------------------------------------------------
-// dvrstream::create (static)
-//
-// Factory method, creates a new dvrstream instance
-//
-// Arguments:
-//
-//	url				- URL of the stream to be opened
-//	buffersize		- Ring buffer size, in bytes
-//	readmincount	- Minimum bytes to return from a read operation
-//	readtimeout		- Read operation timeout, in millseconds
-
-std::unique_ptr<dvrstream> dvrstream::create(char const* url, size_t buffersize, size_t readmincount, unsigned int readtimeout)
-{
-	return std::unique_ptr<dvrstream>(new dvrstream(url, buffersize, readmincount, readtimeout));
+	return std::unique_ptr<dvrstream>(new dvrstream(url, buffersize, readmincount));
 }
 
 //---------------------------------------------------------------------------
@@ -297,11 +330,13 @@ size_t dvrstream::curl_responseheaders(char const* data, size_t size, size_t cou
 {
 	static const char ACCEPT_RANGES_HEADER[]		= "Accept-Ranges: bytes";
 	static const char CONTENT_RANGE_HEADER[]		= "Content-Range: bytes";
+	static const char EMPTY_HEADER[]				= "\r\n";
 	static const size_t ACCEPT_RANGES_HEADER_LEN	= strlen(ACCEPT_RANGES_HEADER);
 	static const size_t CONTENT_RANGE_HEADER_LEN	= strlen(CONTENT_RANGE_HEADER);
+	static const size_t EMPTY_HEADER_LEN			= strlen(EMPTY_HEADER);
 
-	size_t cb = size * count;				// Calculate the actual byte count
-	if(cb == 0) return 0;					// Nothing to do
+	size_t cb = size * count;						// Calculate the actual byte count
+	if(cb == 0) return 0;							// Nothing to do
 
 	// Cast the context pointer back into a dvrstream instance
 	dvrstream* instance = reinterpret_cast<dvrstream*>(context);
@@ -337,66 +372,14 @@ size_t dvrstream::curl_responseheaders(char const* data, size_t size, size_t cou
 		instance->m_length = length;
 	}
 
+	// \r\n (empty header)
+	else if((cb >= EMPTY_HEADER_LEN) && (strncmp(EMPTY_HEADER, data, EMPTY_HEADER_LEN) == 0)) {
+
+		// The final header has been processed, indicate that by setting the flag
+		instance->m_headers = true;
+	}
+
 	return cb;
-}
-
-//---------------------------------------------------------------------------
-// dvrstream::curl_transfercontrol (static, private)
-//
-// libcurl callback to handle transfer information/progress
-//
-// Arguments:
-//
-//	context		- Caller-provided context pointer
-//	dltotal		- Number of bytes expected to be downloaded
-//	dlnow		- Number of bytes already downloaded
-//	ultotal		- Number of bytes expected to be uploaded
-//	ulnow		- Number of bytes already uploaded
-
-int dvrstream::curl_transfercontrol(void* context, curl_off_t /*dltotal*/, curl_off_t /*dlnow*/, curl_off_t /*ultotal*/, curl_off_t /*ulnow*/)
-{
-	// Cast the dvrstream instance pointer out from the context pointer
-	dvrstream* instance = reinterpret_cast<dvrstream*>(context);
-
-	// If a stop has been signaled, terminate the transfer
-	if(instance->m_stop.exchange(false) == true) return -1;
-
-	// Automatically resume a paused data transfer when this notification callback is invoked
-	if(instance->m_paused.exchange(false) == true) curl_easy_pause(instance->m_curl, CURLPAUSE_CONT);
-
-	return 0;
-}
-
-//---------------------------------------------------------------------------
-// dvrstream::curl_transfer_func (private)
-//
-// Worker thread procedure for the CURL data transfer
-//
-// Arguments:
-//
-//	position		- Requested starting position for the transfer
-
-void dvrstream::curl_transfer_func(long long position)
-{
-	assert(position >= 0);				// Should always be a positive value
-
-	// Format the Range: header value to apply to the transfer object, do not use CURLOPT_RESUME_FROM_LARGE 
-	// as it will not insert the request header when the position is zero
-	char byterange[32];
-	snprintf(byterange, std::extent<decltype(byterange)>::value, "%lld-", std::max(position, 0LL));
-
-	// Attempt to execute the current transfer operation
-	m_curlresult = curl_easy_setopt(m_curl, CURLOPT_RANGE, byterange);
-	if(m_curlresult == CURLE_OK) m_curlresult = curl_easy_perform(m_curl);
-
-	// If curl_easy_perform fails, m_started will never be signaled by the
-	// write callback; signal it now to release any waiting threads
-	m_started = true;
-
-	// When the thread has completed, set the stopped flag and signal the condvar
-	// to release any in-progress read() that is waiting for data
-	m_stopped.store(true);
-	m_cv.notify_all();
 }
 
 //---------------------------------------------------------------------------
@@ -421,46 +404,31 @@ size_t dvrstream::curl_write(void const* data, size_t size, size_t count, void* 
 	// Cast the context pointer back into a dvrstream instance
 	dvrstream* instance = reinterpret_cast<dvrstream*>(context);
 
-	// To support seeking within the ring buffer, some level of synchronization
-	// is required -- there should be almost zero contention on this lock
-	std::unique_lock<std::mutex> writelock(instance->m_writelock);
-
-	// Copy the current head and tail positions, this works without a lock by operating
-	// on the state of the buffer at the time of the request
-	size_t head = instance->m_bufferhead.load();
-	size_t tail = instance->m_buffertail.load();
-
 	// This operation requires that all of the data be written, if it isn't going to fit in the
 	// available ring buffer space, the input stream has to be paused via CURL_WRITEFUNC_PAUSE
-	size_t available = (head < tail) ? tail - head : (instance->m_buffersize - head) + tail;
-	if(available < (cb + 1)) { instance->m_paused.store(true); return CURL_WRITEFUNC_PAUSE; }
+	size_t available = (instance->m_head < instance->m_tail) ? instance->m_tail - instance->m_head : (instance->m_buffersize - instance->m_head) + instance->m_tail;
+	if(available < (cb + 1)) { instance->m_paused = true; return CURL_WRITEFUNC_PAUSE; }
 
 	// Write until the buffer has been exhausted or the desired count has been reached
 	while(cb) {
 
 		// If the head is behind the tail linearly, take the data between them otherwise
 		// take the data between the end of the buffer and the head
-		size_t chunk = (head < tail) ? std::min(cb, tail - head) : std::min(cb, instance->m_buffersize - head);
-		memcpy(&instance->m_buffer[head], &reinterpret_cast<uint8_t const*>(data)[byteswritten], chunk);
+		size_t chunk = (instance->m_head < instance->m_tail) ? std::min(cb, instance->m_tail - instance->m_head) : std::min(cb, instance->m_buffersize - instance->m_head);
+		memcpy(&instance->m_buffer[instance->m_head], &reinterpret_cast<uint8_t const*>(data)[byteswritten], chunk);
 
-		head += chunk;					// Increment the head position
+		instance->m_head += chunk;		// Increment the head position
 		byteswritten += chunk;			// Increment number of bytes written
 		cb -= chunk;					// Decrement remaining bytes
 
 		// If the head has reached the end of the buffer, reset it back to zero
-		if(head >= instance->m_buffersize) head = 0;
+		if(instance->m_head >= instance->m_buffersize) instance->m_head = 0;
 	}
 
 	assert(byteswritten == (size * count));		// Verify all bytes were written
-	instance->m_bufferhead.store(head);			// Modify atomic<> head position
-	instance->m_cv.notify_all();				// Data has been written
 
 	// Increment the number of bytes seen as part of this transfer
 	instance->m_writepos += byteswritten;
-
-	// Release any thread waiting for the transfer to start *after* some data is
-	// available to be read from the buffer to avoid initial reader starvation
-	instance->m_started = true;
 
 	return byteswritten;
 }
@@ -472,14 +440,14 @@ size_t dvrstream::curl_write(void const* data, size_t size, size_t count, void* 
 //
 // Arguments:
 //
-//	lock		- Reference to unique_lock<> that must be owned
 //	buffer		- Pointer to the mpeg-ts packets to filter
 //	count		- Number of mpeg-ts packets provided in the buffer
 
-void dvrstream::filter_packets(std::unique_lock<std::mutex> const& lock, uint8_t* buffer, size_t count)
+void dvrstream::filter_packets(uint8_t* buffer, size_t count)
 {
-	// The lock argument is necessary to ensure the caller owns it before proceeding
-	if(!lock.owns_lock()) throw string_exception(__func__, ": caller does not own the unique_lock<>");
+	// The packet filter can be disabled completely for a stream if the
+	// MPEG-TS packets become misaligned; leaving it enabled might trash things
+	if(!m_enablefilter) return;
 
 	// Iterate over all of the packets provided in the buffer
 	for(size_t index = 0; index < count; index++) {
@@ -496,14 +464,60 @@ void dvrstream::filter_packets(std::unique_lock<std::mutex> const& lock, uint8_t
 		bool adaptation = (ts_header & 0x00000020) == 0x00000020;
 		bool payload = (ts_header & 0x00000010) == 0x00000010;
 
-		// Check the sync byte, should always be 0x47.  If the packets aren't
-		// in sync, abort the operation -- they will all be out of sync
+		// Check the sync byte, should always be 0x47.  If the packets aren't in sync
+		// all kinds of bad things can happen
 		assert(sync == 0x47);
-		if(sync != 0x47) return;
+		if(sync != 0x47) { 
+			
+			m_enablefilter = m_enablepcrs = false;		// Stop filtering packets
+			m_startpts = m_currentpts = 0;				// Disable PCR reporting
 
-		// Skip over the header and any adaptation bytes
+			return;
+		}
+
+		// Move the pointer beyond the TS header
 		current += 4U;
-		if(adaptation) current += read_be8(current);
+
+		// If the packet contains adaptation bytes check for and handle the PCR
+		if(adaptation) {
+
+			// Get the adapation field length, this needs to be at least 7 bytes for
+			// it to possibly include the PCR value
+			uint8_t adaptationlength = read_be8(current);
+			if((adaptationlength >= 7) && (m_enablepcrs)) {
+
+				// Only use the first PID on which a PCR has been detected, there may
+				// be multiple elementary streams that contain PCR values
+				if((m_pcrpid == 0) || (pid == m_pcrpid)) {
+
+					// Check the adaptation flags to see if a PCR is in this packet
+					uint8_t adaptationflags = read_be8(current + 1U);
+					if((adaptationflags & 0x10) == 0x10) {
+
+						// If the PCR PID hasn't been set, use this PID from now on
+						if(m_pcrpid == 0) m_pcrpid = pid;
+
+						// Decode the current PCR using the 90KHz period only, there is 
+						// no need to deal with the full 27MHz period
+						m_currentpts = decode_pcr90khz(current + 2U);
+						if(m_startpts == 0) m_startpts = m_currentpts;
+
+						assert(m_currentpts >= m_startpts);
+
+						// If the current PCR is less than the original PCR value something has
+						// gone wrong; disable all PCR detection and reporting on this stream
+						if(m_currentpts < m_startpts) {
+
+							m_enablepcrs = false;
+							m_startpts = m_currentpts = 0;
+						}
+					}
+				}
+			}
+
+			// Move the pointer beyond the adaptation data
+			current += adaptationlength;
+		}
 
 		// >> PAT
 		if((pid == 0x0000) && (payload)) {
@@ -569,14 +583,13 @@ void dvrstream::filter_packets(std::unique_lock<std::mutex> const& lock, uint8_t
 
 long long dvrstream::length(void) const
 {
-	std::unique_lock<std::mutex> lock(m_lock);
 	return (m_length == MAX_STREAM_LENGTH) ? -1 : m_length;
 }
 
 //---------------------------------------------------------------------------
 // dvrstream::position
 //
-// Gets the current position of the stream; or -1 if stream is real-time
+// Gets the current position of the stream
 //
 // Arguments:
 //
@@ -584,8 +597,7 @@ long long dvrstream::length(void) const
 
 long long dvrstream::position(void) const
 {
-	std::unique_lock<std::mutex> lock(m_lock);
-	return (m_length == MAX_STREAM_LENGTH) ? -1 : m_readpos;
+	return m_readpos;
 }
 
 //---------------------------------------------------------------------------
@@ -601,51 +613,29 @@ long long dvrstream::position(void) const
 size_t dvrstream::read(uint8_t* buffer, size_t count)
 {
 	size_t				bytesread = 0;			// Total bytes actually read
-	size_t				head = 0;				// Current head position
-	size_t				tail = 0;				// Current tail position
 	size_t				available = 0;			// Available bytes to read
-	bool				stopped = false;		// Flag if data transfer has stopped
 
 	// Verify that the minimum read count has been aligned properly during construction
 	assert(m_readmincount == align::down(m_readmincount, MPEGTS_PACKET_LENGTH));
 	assert(m_readmincount >= MPEGTS_PACKET_LENGTH);
 
-	// Verify that the read timeout is at least one millisecond
-	assert(m_readtimeout >= 1U);
-
-	if(buffer == nullptr) throw std::invalid_argument("buffer");
-	if(count > m_buffersize) throw std::invalid_argument("count");
+	if(count >= m_buffersize) throw std::invalid_argument("count");
 	if(count == 0) return 0;
 
-	std::unique_lock<std::mutex> lock(m_lock);
+	// Transfer data into the ring buffer until the minimum amount of data is available, 
+	// the stream has completed, or an exception/error occurs
+	transfer_until([&]() -> bool {
 
-	// Wait up to the timeout for there to be the minimim amount of available data in the
-	// buffer, if there is not the condvar will be triggered on the next write or a thread stop.
-	if(m_cv.wait_until(lock, std::chrono::system_clock::now() + std::chrono::milliseconds(m_readtimeout), [&]() -> bool { 
+		available = (m_tail > m_head) ? (m_buffersize - m_tail) + m_head : m_head - m_tail;
+		return (available >= m_readmincount);
+	});
 
-		tail = m_buffertail.load();				// Copy the atomic<> tail position
-		head = m_bufferhead.load();				// Copy the atomic<> head position
-		stopped = m_stopped.load();				// Copy the atomic<> stopped flag
+	// If there is no available data in the ring buffer after transfer_until, indicate stream is finished
+	if(available == 0) return 0;
 
-		// Calculate the amount of space available in the buffer
-		available = (tail > head) ? (m_buffersize - tail) + head : head - tail;
-		
-		// The result from the predicate is true if enough data or stopped
-		return ((available >= m_readmincount) || (stopped));
+	// Wait until the first successful read operation to set the start time for the stream
+	if(m_starttime == 0) m_starttime = time(nullptr);
 	
-	}) == false) return 0;
-
-	// If the wait loop was broken by the worker thread stopping, make one more pass
-	// to ensure that no additional data was first written by the thread
-	if((available < m_readmincount) && (stopped)) {
-
-		tail = m_buffertail.load();				// Copy the atomic<> tail position
-		head = m_bufferhead.load();				// Copy the atomic<> head position
-
-		// Calculate the amount of space available in the buffer
-		available = (tail > head) ? (m_buffersize - tail) + head : head - tail;
-	}
-
 	// Reads are no longer aligned to return full MPEG-TS packets, determine the offset
 	// from the current read position to the first full packet of data
 	size_t packetoffset = static_cast<size_t>(align::up(m_readpos, MPEGTS_PACKET_LENGTH) - m_readpos);
@@ -660,23 +650,22 @@ size_t dvrstream::read(uint8_t* buffer, size_t count)
 
 		// If the tail is behind the head linearly, take the data between them otherwise
 		// take the data between the end of the buffer and the tail
-		size_t chunk = (tail < head) ? std::min(count, head - tail) : std::min(count, m_buffersize - tail);
-		memcpy(&buffer[bytesread], &m_buffer[tail], chunk);
+		size_t chunk = (m_tail < m_head) ? std::min(count, m_head - m_tail) : std::min(count, m_buffersize - m_tail);
+		if(buffer != nullptr) memcpy(&buffer[bytesread], &m_buffer[m_tail], chunk);
 
-		tail += chunk;						// Increment the tail position
+		m_tail += chunk;					// Increment the tail position
 		bytesread += chunk;					// Increment number of bytes read
 		count -= chunk;						// Decrement remaining bytes
 
 		// If the tail has reached the end of the buffer, reset it back to zero
-		if(tail >= m_buffersize) tail = 0;
+		if(m_tail >= m_buffersize) m_tail = 0;
 	}
 
-	m_buffertail.store(tail);				// Modify atomic<> tail position
 	m_readpos += bytesread;					// Update the reader position
 
 	// Apply the mpeg-ts packet filter against all complete packets that were read
-	if(bytesread >= (packetoffset + MPEGTS_PACKET_LENGTH)) 
-		filter_packets(lock, buffer + packetoffset, (bytesread / MPEGTS_PACKET_LENGTH));
+	if((bytesread >= (packetoffset + MPEGTS_PACKET_LENGTH)) && (buffer != nullptr)) 
+		filter_packets(buffer + packetoffset, (bytesread / MPEGTS_PACKET_LENGTH));
 
 	return bytesread;
 }
@@ -692,7 +681,6 @@ size_t dvrstream::read(uint8_t* buffer, size_t count)
 
 bool dvrstream::realtime(void) const
 {
-	std::unique_lock<std::mutex> lock(m_lock);
 	return (m_length == MAX_STREAM_LENGTH);
 }
 
@@ -703,55 +691,41 @@ bool dvrstream::realtime(void) const
 //
 // Arguments:
 //
-//	lock			- Reference to unique_lock<> that must be owned
 //	position		- Requested starting position for the transfer
 
-long long dvrstream::restart(std::unique_lock<std::mutex>& lock, long long position)
+long long dvrstream::restart(long long position)
 {
-	// The lock argument is necessary to ensure the caller owns it before proceeding
-	if(!lock.owns_lock()) throw string_exception(__func__, ": caller does not own the unique_lock<>");
+	assert(position >= 0);				// Should always be a positive value
 
-	// Stop the existing data transfer operation if necessary
-	if(m_worker.joinable()) {
+	// Remove the easy transfer handle from the multi transfer handle
+	CURLMcode curlmresult = curl_multi_remove_handle(m_curlm, m_curl);
+	if(curlmresult != CURLM_OK) throw string_exception(__func__, ": curl_multi_remove_handle() failed: ", curl_multi_strerror(curlmresult));
 
-		m_stop.store(true);				// Signal the thread to stop the transfer
+	// Reset all of the stream state and ring buffer values back to the defaults; leave the 
+	// start time and start presentation timestamp values at their original values
+	m_paused = m_headers = m_canseek = false;
+	m_head = m_tail = 0;
+	m_startpos = m_readpos = m_writepos = 0;
+	m_length = MAX_STREAM_LENGTH;
+	m_currentpts = 0;
 
-		// It's somewhat faster to wait for the worker thread to signal m_stopped and then
-		// just let the thread die naturally than it is to join it here; saves a few milliseconds
-		m_cv.wait(lock, [&]() -> bool { return m_stopped.load(); });
-		m_worker.detach();
-	}
+	// Format the Range: header value to apply to the transfer object, do not use CURLOPT_RESUME_FROM_LARGE 
+	// as it will not insert the request header when the position is zero
+	char byterange[32] = { '\0' };
+	snprintf(byterange, std::extent<decltype(byterange)>::value, "%lld-", std::max(position, 0LL));
 
-	// Reinitialize the result code CURL error buffer
-	m_curlresult = CURLE_OK;
-	memset(m_curlerr, 0, CURL_ERROR_SIZE);
+	// Attempt to execute the current transfer operation
+	CURLcode curlresult = curl_easy_setopt(m_curl, CURLOPT_RANGE, byterange);
+	if(curlresult != CURLE_OK) throw string_exception(__func__, ": curl_easy_setopt() failed: ", curl_easy_strerror(curlresult));
 
-	// Reinitialize the stream control flags
-	m_started = false;
-	m_stopped.store(false);
-	m_paused.store(false);
-	m_stop.store(false);
+	// Add the modified easy transfer handle back to the multi transfer handle and
+	// attempt to restart the stream at the specified position
+	curlmresult = curl_multi_add_handle(m_curlm, m_curl);
+	if(curlmresult != CURLM_OK) throw string_exception(__func__, ": curl_multi_remove_handle() failed: ", curl_multi_strerror(curlmresult));
 
-	// Reinitialize the stream information
-	m_startpos = m_readpos = m_writepos = m_length = 0;
-	m_canseek = false;
-
-	// Reinitialize the ring buffer back to an empty state
-	m_bufferhead.store(0);
-	m_buffertail.store(0);
-
-	// Create a new worker thread on which to perform the transfer operations and wait for it to start
-	m_worker = std::thread(&dvrstream::curl_transfer_func, this, position);
-	m_started.wait_until_equals(true);
-
-	// If the transfer thread failed to initiate the data transfer throw an exception
-	if((m_curlresult != CURLE_OK) && (m_curlresult != CURLE_ABORTED_BY_CALLBACK)) {
-
-		m_stop.store(true);				// Signal worker to stop (shouldn't be running)
-		m_worker.join();				// Wait for the worker thread to stop
-
-		throw string_exception(__func__, ": failed to restart transfer at position ", position, ": ", m_curlerr);
-	}
+	// Execute the data transfer until the HTTP headers have been received and processed
+	if(!transfer_until([&]() -> bool { return m_headers == true; })) 
+		throw string_exception(__func__, ": failed to receive HTTP response headers");
 
 	return m_readpos;					// Return new starting position of the stream
 }
@@ -770,10 +744,8 @@ long long dvrstream::seek(long long position, int whence)
 {
 	long long			newposition = 0;			// New stream position
 
-	std::unique_lock<std::mutex> lock(m_lock);
-
-	// If the stream cannot be seeked, just return the current position
-	if(!m_canseek) return m_readpos;
+	// If the stream cannot be seeked, return -1 to indicate the operation is not supported.
+	if(!m_canseek) return -1;
 
 	// Calculate the new position of the stream
 	if(whence == SEEK_SET) newposition = std::max(position, 0LL);
@@ -783,42 +755,109 @@ long long dvrstream::seek(long long position, int whence)
 
 	// Adjust for overflow/underflow of the new position.  If the seek was forward set it
 	// to numeric_limits<long long>::max, otherwise set it back to zero
-	if(newposition < 0) newposition = (position > 0) ? std::numeric_limits<long long>::max() : 0;
+	if(newposition < 0) newposition = (position >= 0) ? std::numeric_limits<long long>::max() : 0;
 
 	// If the calculated position matches the current position there is nothing to do
 	if(newposition == m_readpos) return m_readpos;
 
-	// Take the write lock to prevent any changes to the head position while calculating
-	// if the seek can be fulfilled with the data already in the buffer
-	std::unique_lock<std::mutex> writelock(m_writelock);
-
 	// Calculate the minimum stream position currently represented in the ring buffer
 	long long minpos = ((m_writepos - m_startpos) > static_cast<long long>(m_buffersize)) ? m_writepos - m_buffersize : m_startpos;
 
-	if((newposition >= minpos) && (newposition <= m_writepos)) {
+	// If the new position is already represented in the ring buffer, modify the tail pointer to
+	// reference that position for the next read operation rather than restarting the stream
+	if((newposition >= minpos) && (newposition < m_writepos)) {
 
 		// If the buffer hasn't wrapped around yet, the new tail position is relative to buffer[0]
-		if(minpos == m_startpos) m_buffertail.store(static_cast<size_t>(newposition - m_startpos));
+		if(minpos == m_startpos) m_tail = static_cast<size_t>(newposition - m_startpos);
 
 		else {
 
-			size_t tail = m_bufferhead.load();				// Start at the head (minpos)
-			long long delta = newposition - minpos;			// Calculate the required delta
+			// The buffer has wrapped around at least once, the new tail position is relative to the
+			// current head position rather than the start of the buffer
+			m_tail = static_cast<size_t>(m_head + (newposition - minpos));
+			if(m_tail >= m_buffersize) m_tail -= m_buffersize;
 
-			// Set the new tail position; if the delta is larger than the remaining space in the
-			// buffer it is relative to buffer[0], otherwise it is relative to buffer[minpos]
-			m_buffertail.store(static_cast<size_t>((delta >= static_cast<long long>(m_buffersize - tail)) ? delta - (m_buffersize - tail) : tail + delta));
+			assert(m_tail <= m_buffersize);				// Verify tail position is valid
 		}
 
 		m_readpos = newposition;						// Set the new tail position
 		return newposition;								// Successful ring buffer seek
 	}
 
-	// Ring buffer seek was unsuccessful, release the lock
-	writelock.unlock();
-
 	// Attempt to restart the stream at the calculated position
-	return restart(lock, newposition);
+	return restart(newposition);
+}
+
+//---------------------------------------------------------------------------
+// dvrstream::starttime
+//
+// Gets the time at which the stream started
+//
+// Arguments:
+//
+//	NONE
+
+time_t dvrstream::starttime(void) const
+{
+	return m_starttime;
+}
+
+//---------------------------------------------------------------------------
+// dvrstream::transfer_until (private)
+//
+// Executes the data transfer until the specified predicate has been satisfied
+// or the transfer has completed
+//
+// Arguments:
+//
+//	predicate		- Predicate to be satisfied by the transfer
+
+bool dvrstream::transfer_until(std::function<bool(void)> predicate)
+{
+	int				numfds;				// Number of active file descriptors
+
+	// If the stream has been paused due to the ring buffer filling up, attempt to resume it
+	// CAUTION: calling curl_easy_pause() with CURLPAUSE_CONT *immediately* attempts to write 
+	// outstanding data into the ring buffer= so when it returns m_paused may have been set 
+	// back to true if the ring buffer is still full after attempting to resume
+	if(m_paused) {
+
+		m_paused = false;									// Reset the stream paused flag
+		curl_easy_pause(m_curl, CURLPAUSE_CONT);			// Resume transfer on the stream
+	}
+
+	// If the stream is still paused (buffer is still full) and the predicate can be satisfied,
+	// go ahead and let the caller do what it wants to do
+	if(m_paused && predicate()) return true;
+
+	// Continue to execute the data transfer until the predicate has been satisfied, the data
+	// transfer operation is complete, or the stream has been paused due to a full buffer condition
+	CURLMcode curlmresult = curl_multi_perform(m_curlm, &numfds);
+	while((curlmresult == CURLM_OK) && (!m_paused) && (numfds > 0) && (predicate() == false)) {
+
+		curlmresult = curl_multi_wait(m_curlm, nullptr, 0, 500, &numfds);
+		if(curlmresult == CURLM_OK) curlmresult = curl_multi_perform(m_curlm, &numfds);
+	}
+
+	// If a curl error occurred, throw an exception
+	if(curlmresult != CURLM_OK) throw string_exception(__func__, ": ", curl_multi_strerror(curlmresult));
+
+	// If the number of file descriptors has reduced to zero, the transfer has completed.
+	// Check for an HTTP error response on the transfer and throw an http_exception that
+	// will let the caller decide what to do about it
+	if(numfds == 0) {
+
+		long responsecode = 200;			// Assume HTTP 200: OK
+
+		// The response code will come back as zero if there was no response from the host,
+		// otherwise it should be a standard HTTP response code
+		curl_easy_getinfo(m_curl, CURLINFO_RESPONSE_CODE, &responsecode);
+
+		if(responsecode == 0) throw string_exception("no response from host");
+		else if((responsecode < 200) || (responsecode > 299)) throw http_exception(responsecode);
+	}
+
+	return predicate();				// Re-evaluate the predicate as the result
 }
 
 //---------------------------------------------------------------------------

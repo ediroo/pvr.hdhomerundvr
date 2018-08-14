@@ -24,7 +24,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <ctime>
 #include <functional>
 #include <list>
 #include <memory>
@@ -222,15 +221,10 @@ struct addon_settings {
 	// Indicates the number of seconds to pause before initiating the startup discovery task
 	int startup_discovery_task_delay;
 
-	// stream_read_minimum_byte_count
+	// stream_read_chunk_size
 	//
 	// Indicates the minimum number of bytes to return from a stream read
-	int stream_read_minimum_byte_count;
-
-	// stream_read_timeout
-	//
-	// Indicates the stream read timeout value (milliseconds)
-	int stream_read_timeout;
+	int stream_read_chunk_size;
 
 	// stream_ring_buffer_size
 	//
@@ -256,16 +250,6 @@ struct addon_settings {
 	//
 	// Indicates the number of milliseconds to subtract to an EDL end value
 	int recording_edl_end_padding;
-
-	// verbose_transfer_logging
-	//
-	// Flag indicating that verbose information should be logged during transfers
-	bool verbose_transfer_logging;
-
-	// disable_realtime_indicator
-	//
-	// Flag indicating that the IsRealTimeStream function should always return false
-	bool disable_realtime_indicator;
 };
 
 //---------------------------------------------------------------------------
@@ -361,15 +345,12 @@ static addon_settings g_settings = {
 	7200,					// discover_recordingrules_interval		default = 2 hours
 	false,					// use_direct_tuning
 	3,						// startup_discovery_task_delay
-	(1 KiB),				// stream_read_minimum_byte_count
-	2500,					// stream_read_timeout
-	(4 MiB),				// stream_ring_buffer_size
+	(4 KiB),				// stream_read_chunk_size
+	(1 MiB),				// stream_ring_buffer_size
 	false,					// enable_recording_edl
 	"",						// recording_edl_folder
 	0,						// recording_edl_start_padding
 	0,						// recording_edl_end_padding
-	false,					// verbose_transfer_logging
-	false,					// disable_realtime_indicator
 };
 
 // g_settings_lock
@@ -540,6 +521,25 @@ static const PVR_TIMER_TYPE g_timertypes[] ={
 //---------------------------------------------------------------------------
 // HELPER FUNCTIONS
 //---------------------------------------------------------------------------
+
+// chunksize_enum_to_bytes
+//
+// Converts the chunk size enumeration values into a number of bytes
+static int chunksize_enum_to_bytes(int nvalue)
+{	
+	switch(nvalue) {
+
+		case 0: return 0;			// None
+		case 1: return (1 KiB);		// 1 Kilobyte
+		case 2: return (2 KiB);		// 2 Kilobytes
+		case 3: return (4 KiB);		// 4 Kilobytes
+		case 4: return (8 KiB);		// 8 Kilobytes
+		case 5: return (16 KiB);	// 16 Kilobytes
+		case 6: return (32 KiB);	// 32 Kilobytes
+	};
+
+	return (4 KiB);					// 4 Kilobytes = default
+}
 
 // copy_settings
 //
@@ -917,7 +917,7 @@ static void discover_startup_task(scalar_condition<bool> const& /*cancel*/)
 // Handler for thrown generic exceptions
 static void handle_generalexception(char const* function)
 {
-	log_error(function, " failed due to an unhandled exception");
+	log_error(function, " failed due to an exception");
 }
 
 // handle_generalexception
@@ -935,7 +935,7 @@ static _result handle_generalexception(char const* function, _result result)
 // Handler for thrown std::exceptions
 static void handle_stdexception(char const* function, std::exception const& ex)
 {
-	log_error(function, " failed due to an unhandled exception: ", ex.what());
+	log_error(function, " failed due to an exception: ", ex.what());
 }
 
 // handle_stdexception
@@ -1038,139 +1038,6 @@ static void log_notice(_args&&... args)
 	log_message(ADDON::addon_log_t::LOG_NOTICE, std::forward<_args>(args)...);
 }
 
-// log_transfer_channel
-//
-// Logs a transfer of a PVR_CHANNEL structure
-static void log_transfer_channel(PVR_CHANNEL const& channel)
-{
-	log_notice("Transferred PVR_CHANNEL: channel=", channel.iChannelNumber, ".", channel.iSubChannelNumber, " channelname=", channel.strChannelName, 
-		" encrypted=", (channel.iEncryptionSystem) ? "true" : "false");
-}
-
-// log_transfer_channelgroup
-//
-// Logs a transfer of a PVR_CHANNEL_GROUP structure
-static void log_transfer_channelgroup(PVR_CHANNEL_GROUP const& group)
-{
-	log_notice("Transferred PVR_CHANNEL_GROUP: groupname=", group.strGroupName);
-}
-
-// log_transfer_channelgroupmember
-//
-// Logs a transfer of a PVR_CHANNEL_GROUP_MEMBER structure
-static void log_transfer_channelgroupmember(PVR_CHANNEL_GROUP_MEMBER const& member)
-{
-	char channel[16]= {'\0'};				// Buffer for converted channelid
-
-	union channelid channelid;
-	channelid.value = static_cast<int>(member.iChannelUniqueId);
-
-	// Convert the channel id back into component parts
-	snprintf(channel, std::extent<decltype(channel)>::value, "%d.%d", channelid.parts.channel, channelid.parts.subchannel);
-
-	log_notice("Transferred PVR_CHANNEL_GROUP_MEMBER: channel=", channel, " groupname=", member.strGroupName);
-}
-
-// log_transfer_epgtag
-//
-// Logs a transfer of an EPG_TAG structure
-static void log_transfer_epgtag(EPG_TAG const& tag)
-{
-	char channel[16]= {'\0'};				// Buffer for converted channelid
-	char starttime[24] = {'\0'};				// Buffer for converted time_t
-	char endtime[24] = {'\0'};				// Buffer for converted time_t
-
-	union channelid channelid;
-	channelid.value = static_cast<int>(tag.iUniqueChannelId);
-
-	// Convert the channel id back into component parts
-	snprintf(channel, std::extent<decltype(channel)>::value, "%d.%d", channelid.parts.channel, channelid.parts.subchannel);
-
-	// Convert both time_t values into "YYYY-MM-DDTHH:MM:SSZ"
-	strftime(starttime, std::extent<decltype(starttime)>::value, "%FT%TZ", gmtime(&tag.startTime));
-	strftime(endtime, std::extent<decltype(endtime)>::value, "%FT%TZ", gmtime(&tag.endTime));
-
-	log_notice("Transferred EPG_TAG: channel=", channel, " title=", tag.strTitle, " starttime=", starttime, " endtime=", endtime);
-}
-
-// log_transfer_recording
-//
-// Logs a transfer of a PVR_RECORDING structure
-static void log_transfer_recording(PVR_RECORDING const& recording)
-{
-	char recordingtime[24] = {'\0'};			// Buffer for converted time_t
-
-	// Convert the time_t value into "YYYY-MM-DDTHH:MM:SSZ"
-	strftime(recordingtime, std::extent<decltype(recordingtime)>::value, "%FT%TZ", gmtime(&recording.recordingTime));
-
-	log_notice("Transferred PVR_RECORDING: directory=", recording.strDirectory, " title=", recording.strTitle, " episodename=", recording.strEpisodeName, 
-		" series=", recording.iSeriesNumber, " episode=", recording.iEpisodeNumber, " recordingtime=", recordingtime);
-}
-
-// log_transfer_timer
-//
-// Logs a transfer of a PVR_TIMER structure
-static void log_transfer_timer(PVR_TIMER const& timer)
-{
-	char type[24]= {'\0'};					// Buffer for the timer type string
-	char state[24]= {'\0'};					// Buffer for the timer state string
-	char channel[16]= {'\0'};				// Buffer for converted channelid
-	char starttime[24] = {'\0'};			// Buffer for converted time_t
-	char endtime[24] = {'\0'};				// Buffer for converted time_t
-
-	union channelid channelid;
-	channelid.value = static_cast<int>(timer.iClientChannelUid);
-
-	// Convert the timer type into a readable string
-	switch(timer.iTimerType) {
-
-		case timer_type::datetimeonlyrule:		snprintf(type, std::extent<decltype(type)>::value, "datetimeonlyrule"); break;
-		case timer_type::datetimeonlytimer:		snprintf(type, std::extent<decltype(type)>::value, "datetimeonlytimer"); break;
-		case timer_type::epgdatetimeonlyrule:	snprintf(type, std::extent<decltype(type)>::value, "epgdatetimeonlyrule"); break;
-		case timer_type::epgseriesrule:			snprintf(type, std::extent<decltype(type)>::value, "epgseriesrule"); break;
-		case timer_type::seriesrule:			snprintf(type, std::extent<decltype(type)>::value, "seriesrule"); break;
-		case timer_type::seriestimer:			snprintf(type, std::extent<decltype(type)>::value, "seriestimer"); break;
-		default:								snprintf(type, std::extent<decltype(type)>::value, "unknown"); break;
-	}
-
-	// Convert the timer state into a readable string; only values supported by this PVR are converted
-	switch(timer.state) {
-
-		case PVR_TIMER_STATE::PVR_TIMER_STATE_SCHEDULED: snprintf(state, std::extent<decltype(state)>::value, "scheduled"); break;
-		case PVR_TIMER_STATE::PVR_TIMER_STATE_RECORDING: snprintf(state, std::extent<decltype(state)>::value, "recording"); break;
-		case PVR_TIMER_STATE::PVR_TIMER_STATE_COMPLETED: snprintf(state, std::extent<decltype(state)>::value, "completed"); break;
-		default: snprintf(state, std::extent<decltype(state)>::value, "unknown"); break;
-	}
-
-	// Convert the channel id back into component parts or use 'any' if set to PVR_TIMER_ANY_CHANNEL
-	if(timer.iClientChannelUid == PVR_TIMER_ANY_CHANNEL) snprintf(channel, std::extent<decltype(channel)>::value, "any");
-	else snprintf(channel, std::extent<decltype(channel)>::value, "%d.%d", channelid.parts.channel, channelid.parts.subchannel);
-
-	// Convert both time_t values into "YYYY-MM-DDTHH:MM:SSZ"
-	strftime(starttime, std::extent<decltype(starttime)>::value, "%FT%TZ", gmtime(&timer.startTime));
-	strftime(endtime, std::extent<decltype(endtime)>::value, "%FT%TZ", gmtime(&timer.endTime));
-
-	log_notice("Transferred PVR_TIMER: type=", type, " state=", state, " channel=", channel, " starttime= ", starttime, " endtime=", endtime);
-}
-
-// mincount_enum_to_bytes
-//
-// Converts the minimum read count enumeration values into a number of bytes
-static int mincount_enum_to_bytes(int nvalue)
-{	
-	switch(nvalue) {
-
-		case 0: return 0;			// None
-		case 1: return (1 KiB);		// 1 Kilobyte
-		case 2: return (2 KiB);		// 2 Kilobytes
-		case 3: return (4 KiB);		// 4 Kilobytes
-		case 4: return (8 KiB);		// 8 Kilobytes
-		case 5: return (16 KiB);	// 16 Kilobytes
-	};
-
-	return (1 KiB);					// 1 Kilobyte = default
-}
-
 // edltype_to_string
 //
 // Converts a PVR_EDL_TYPE enumeration value into a string
@@ -1230,19 +1097,6 @@ static bool try_getepgforchannel(ADDON_HANDLE handle, PVR_CHANNEL const& channel
 		// Pull a database connection out from the connection pool
 		connectionpool::handle dbhandle(g_connpool);
 
-		// Log the request if verbose_disovery_logging has been enabled
-		if(settings.verbose_transfer_logging) {
-
-			char strstart[24] = {'\0'};				// Buffer for converted time_t
-			char strend[24] = {'\0'};				// Buffer for converted time_t
-
-			// Convert both time_t values into "YYYY-MM-DDTHH:MM:SSZ"
-			strftime(strstart, std::extent<decltype(strstart)>::value, "%FT%TZ", gmtime(&start));
-			strftime(strend, std::extent<decltype(strend)>::value, "%FT%TZ", gmtime(&end));
-
-			log_notice(__func__, ": Guide data requested for channel ", channel.strChannelName, ": start=", strstart, " end=", strend);
-		}
-
 		// Enumerate all of the guide entries in the database for this channel and time frame
 		enumerate_guideentries(dbhandle, channelid, start, end, settings.prepend_episode_numbers_in_epg, [&](struct guideentry const& item) -> void {
 
@@ -1301,9 +1155,8 @@ static bool try_getepgforchannel(ADDON_HANDLE handle, PVR_CHANNEL const& channel
 			// strSeriesLink
 			epgtag.strSeriesLink = item.seriesid;
 
-			// Transfer the EPG_TAG structure over over to Kodi and log if enabled
+			// Transfer the EPG_TAG structure over to Kodi
 			g_pvr->TransferEpgEntry(handle, &epgtag);
-			if(settings.verbose_transfer_logging) log_transfer_epgtag(epgtag);
 		});
 	}
 	
@@ -1397,15 +1250,12 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 			// Load the advanced settings
 			if(g_addon->GetSetting("use_direct_tuning", &bvalue)) g_settings.use_direct_tuning = bvalue;
 			if(g_addon->GetSetting("startup_discovery_task_delay", &nvalue)) g_settings.startup_discovery_task_delay = nvalue;
-			if(g_addon->GetSetting("stream_read_minimum_byte_count", &nvalue)) g_settings.stream_read_minimum_byte_count = mincount_enum_to_bytes(nvalue);
-			if(g_addon->GetSetting("stream_read_timeout", &nvalue)) g_settings.stream_read_timeout = nvalue;
+			if(g_addon->GetSetting("stream_read_chunk_size", &nvalue)) g_settings.stream_read_chunk_size = chunksize_enum_to_bytes(nvalue);
 			if(g_addon->GetSetting("stream_ring_buffer_size", &nvalue)) g_settings.stream_ring_buffer_size = ringbuffersize_enum_to_bytes(nvalue);
 			if(g_addon->GetSetting("enable_recording_edl", &bvalue)) g_settings.enable_recording_edl = bvalue;
 			if(g_addon->GetSetting("recording_edl_folder", strvalue)) g_settings.recording_edl_folder.assign(strvalue);
 			if(g_addon->GetSetting("recording_edl_start_padding", &nvalue)) g_settings.recording_edl_start_padding = nvalue;
 			if(g_addon->GetSetting("recording_edl_end_padding", &nvalue)) g_settings.recording_edl_end_padding = nvalue;
-			if(g_addon->GetSetting("verbose_transfer_logging", &bvalue)) g_settings.verbose_transfer_logging = bvalue;
-			if(g_addon->GetSetting("disable_realtime_indicator", &bvalue)) g_settings.disable_realtime_indicator = bvalue;
 
 			// Create the global guicallbacks instance
 			g_gui.reset(new CHelper_libKODI_guilib());
@@ -1873,27 +1723,15 @@ ADDON_STATUS ADDON_SetSetting(char const* name, void const* value)
 		}
 	}
 
-	// stream_read_minimum_byte_count
+	// stream_read_chunk_size
 	//
-	else if(strcmp(name, "stream_read_minimum_byte_count") == 0) {
+	else if(strcmp(name, "stream_read_chunk_size") == 0) {
 
-		int nvalue = mincount_enum_to_bytes(*reinterpret_cast<int const*>(value));
-		if(nvalue != g_settings.stream_read_minimum_byte_count) {
+		int nvalue = chunksize_enum_to_bytes(*reinterpret_cast<int const*>(value));
+		if(nvalue != g_settings.stream_read_chunk_size) {
 
-			g_settings.stream_read_minimum_byte_count = nvalue;
-			log_notice(__func__, ": setting stream_read_minimum_byte_count changed to ", nvalue, " bytes");
-		}
-	}
-
-	// stream_read_timeout
-	//
-	else if(strcmp(name, "stream_read_timeout") == 0) {
-
-		int nvalue = *reinterpret_cast<int const*>(value);
-		if(nvalue != g_settings.stream_read_timeout) {
-
-			g_settings.stream_read_timeout = nvalue;
-			log_notice(__func__, ": setting stream_read_timeout changed to ", nvalue, " milliseconds");
+			g_settings.stream_read_chunk_size = nvalue;
+			log_notice(__func__, ": setting stream_read_chunk_size changed to ", nvalue, " bytes");
 		}
 	}
 
@@ -1953,30 +1791,6 @@ ADDON_STATUS ADDON_SetSetting(char const* name, void const* value)
 
 			g_settings.recording_edl_end_padding = nvalue;
 			log_notice(__func__, ": setting recording_edl_end_padding changed to ", nvalue, " milliseconds");
-		}
-	}
-
-	// verbose_transfer_logging
-	//
-	else if(strcmp(name, "verbose_transfer_logging") == 0) {
-
-		bool bvalue = *reinterpret_cast<bool const*>(value);
-		if(bvalue != g_settings.verbose_transfer_logging) {
-
-			g_settings.verbose_transfer_logging = bvalue;
-			log_notice(__func__, ": setting verbose_transfer_logging changed to ", (bvalue) ? "true" : "false");
-		}
-	}
-
-	// disable_realtime_indicator
-	//
-	else if(strcmp(name, "disable_realtime_indicator") == 0) {
-
-		bool bvalue = *reinterpret_cast<bool const*>(value);
-		if(bvalue != g_settings.disable_realtime_indicator) {
-
-			g_settings.disable_realtime_indicator = bvalue;
-			log_notice(__func__, ": setting disable_realtime_indicator changed to ", (bvalue) ? "true" : "false");
 		}
 	}
 
@@ -2464,29 +2278,20 @@ PVR_ERROR GetChannelGroups(ADDON_HANDLE handle, bool radio)
 	// The PVR doesn't support radio channel groups
 	if(radio) return PVR_ERROR::PVR_ERROR_NO_ERROR;
 
-	// Create a copy of the current addon settings structure
-	struct addon_settings settings = copy_settings();
-
-	// Log the request if verbose_disovery_logging has been enabled
-	if(settings.verbose_transfer_logging) log_notice(__func__, ": Channel group data requested");
-
 	PVR_CHANNEL_GROUP group;
 	memset(&group, 0, sizeof(PVR_CHANNEL_GROUP));
 
 	// Favorite Channels
 	snprintf(group.strGroupName, std::extent<decltype(group.strGroupName)>::value, "Favorite Channels");
 	g_pvr->TransferChannelGroup(handle, &group);
-	if(settings.verbose_transfer_logging) log_transfer_channelgroup(group);
 
 	// HD Channels
 	snprintf(group.strGroupName, std::extent<decltype(group.strGroupName)>::value, "HD Channels");
 	g_pvr->TransferChannelGroup(handle, &group);
-	if(settings.verbose_transfer_logging) log_transfer_channelgroup(group);
 
 	// SD Channels
 	snprintf(group.strGroupName, std::extent<decltype(group.strGroupName)>::value, "SD Channels");
 	g_pvr->TransferChannelGroup(handle, &group);
-	if(settings.verbose_transfer_logging) log_transfer_channelgroup(group);
 
 	return PVR_ERROR::PVR_ERROR_NO_ERROR;
 }
@@ -2529,9 +2334,6 @@ PVR_ERROR GetChannelGroupMembers(ADDON_HANDLE handle, PVR_CHANNEL_GROUP const& g
 		// Pull a database connection out from the connection pool
 		connectionpool::handle dbhandle(g_connpool);
 
-		// Log the request if verbose_disovery_logging has been enabled
-		if(settings.verbose_transfer_logging) log_notice(__func__, ": Channel group member data requested");
-
 		// Enumerate all of the channels in the specified group
 		enumerator(dbhandle, settings.show_drm_protected_channels, [&](union channelid const& item) -> void {
 
@@ -2553,19 +2355,9 @@ PVR_ERROR GetChannelGroupMembers(ADDON_HANDLE handle, PVR_CHANNEL_GROUP const& g
 			// Copy the PVR_CHANNEL_GROUP_MEMBER into the local vector<>
 			members.push_back(std::move(member));
 		});
-	}
 
-	catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
-	catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
-
-	try {
-
-		for(auto const& it : members) {
-
-			// Transfer the generated PVR_CHANNEL_GROUP_MEMBER structure over to Kodi and log if enabled
-			g_pvr->TransferChannelGroupMember(handle, &it);
-			if(settings.verbose_transfer_logging) log_transfer_channelgroupmember(it);
-		}
+		// Transfer the generated PVR_CHANNEL_GROUP_MEMBER structure over to Kodi
+		for(auto const& it : members) g_pvr->TransferChannelGroupMember(handle, &it);
 	}
 
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
@@ -2635,9 +2427,6 @@ PVR_ERROR GetChannels(ADDON_HANDLE handle, bool radio)
 		// Pull a database connection out from the connection pool
 		connectionpool::handle dbhandle(g_connpool);
 
-		// Log the request if verbose_disovery_logging has been enabled
-		if(settings.verbose_transfer_logging) log_notice(__func__, ": Channel data requested");
-
 		// Enumerate all of the channels in the database
 		enumerate_channels(dbhandle, settings.prepend_channel_numbers, settings.show_drm_protected_channels, [&](struct channel const& item) -> void {
 
@@ -2673,21 +2462,11 @@ PVR_ERROR GetChannels(ADDON_HANDLE handle, bool radio)
 			// Copy the PVR_CHANNEL structure into the local vector<>
 			channels.push_back(channel);
 		});
+
+		// Transfer the generated PVR_CHANNEL structure over to Kodi 
+		for(auto const& it : channels) g_pvr->TransferChannelEntry(handle, &it);
 	}
 	
-	catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
-	catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
-
-	try {
-
-		for(auto const& it : channels) {
-
-			// Transfer the generated PVR_CHANNEL structure over to Kodi and log if enabled
-			g_pvr->TransferChannelEntry(handle, &it);
-			if(settings.verbose_transfer_logging) log_transfer_channel(it);
-		}
-	}
-
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
 	catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
 
@@ -2799,9 +2578,6 @@ PVR_ERROR GetRecordings(ADDON_HANDLE handle, bool deleted)
 		// Pull a database connection out from the connection pool
 		connectionpool::handle dbhandle(g_connpool);
 
-		// Log the request if verbose_disovery_logging has been enabled
-		if(settings.verbose_transfer_logging) log_notice(__func__, ": Recording data requested");
-
 		// Enumerate all of the recordings in the database
 		enumerate_recordings(dbhandle, settings.use_episode_number_as_title, [&](struct recording const& item) -> void {
 
@@ -2870,21 +2646,11 @@ PVR_ERROR GetRecordings(ADDON_HANDLE handle, bool deleted)
 			// Copy the PVR_RECORDING structure into the local vector<>
 			recordings.push_back(recording);
 		});
+
+		// Transfer the generated PVR_RECORDING structure over to Kodi 
+		for(auto const& it : recordings) g_pvr->TransferRecordingEntry(handle, &it);
 	}
 	
-	catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
-	catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
-
-	try { 
-
-		for(auto const& it : recordings) {
-
-			// Transfer the generated PVR_RECORDING structure over to Kodi and log if enabled
-			g_pvr->TransferRecordingEntry(handle, &it);
-			if(settings.verbose_transfer_logging) log_transfer_recording(it);
-		}
-	}
-
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
 	catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
 
@@ -3186,16 +2952,10 @@ PVR_ERROR GetTimers(ADDON_HANDLE handle)
 	// connection isn't open any longer than necessary
 	std::vector<PVR_TIMER> timers;
 
-	// Create a copy of the current addon settings structure
-	struct addon_settings settings = copy_settings();
-
 	try {
 
 		// Pull a database connection out from the connection pool
 		connectionpool::handle dbhandle(g_connpool);
-
-		// Log the request if verbose_disovery_logging has been enabled
-		if(settings.verbose_transfer_logging) log_notice(__func__, ": Timer data requested");
 
 		// Enumerate all of the recording rules in the database
 		enumerate_recordingrules(dbhandle, [&](struct recordingrule const& item) -> void {
@@ -3295,21 +3055,11 @@ PVR_ERROR GetTimers(ADDON_HANDLE handle)
 			// Copy the PVR_TIMER structure into the local vector<>
 			timers.push_back(timer);
 		});
+
+		// Transfer the generated PVR_TIMER structure over to Kodi
+		for(auto const& it : timers) g_pvr->TransferTimerEntry(handle, &it);
 	}
 	
-	catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
-	catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
-
-	try { 
-
-		for(auto const& it : timers) {
-
-			// Transfer the generated PVR_TIMER structure over to Kodi and log if enabled
-			g_pvr->TransferTimerEntry(handle, &it);
-			if(settings.verbose_transfer_logging) log_transfer_timer(it);
-		}
-	}
-
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
 	catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
 
@@ -3573,6 +3323,8 @@ bool OpenLiveStream(PVR_CHANNEL const& channel)
 	char			channelstr[64];			// Channel number as a string
 	std::string		streamurl;				// Generated stream URL
 
+	assert(g_addon);
+
 	// DRM channels are flagged with a non-zero iEncryptionSystem value to prevent streaming
 	if(channel.iEncryptionSystem != 0) {
 	
@@ -3583,9 +3335,6 @@ bool OpenLiveStream(PVR_CHANNEL const& channel)
 
 	// Create a copy of the current addon settings structure
 	struct addon_settings settings = copy_settings();
-
-	// If the user wants to pause discovery during live streaming, do so
-	if(settings.pause_discovery_while_streaming) g_scheduler.pause();
 
 	// The only interesting thing about PVR_CHANNEL is the channel id
 	union channelid channelid;
@@ -3600,9 +3349,14 @@ bool OpenLiveStream(PVR_CHANNEL const& channel)
 		// Pull a database connection out from the connection pool
 		connectionpool::handle dbhandle(g_connpool);
 
+		// Generate a log message for tuner-direct channels indicating that the storage engine will not be used;
+		// streamurl will be left as a zero-length string triggering the tuner-direct action below
+		if(get_tuner_direct_channel_flag(dbhandle, channelid))
+			log_notice(__func__, ": channel ", channelstr, " is flagged as tuner-direct only; an available storage engine will not be used for this stream");
+
 		// If direct tuning is disabled, first attempt to generate the stream URL for the specified 
 		// channel from the storage engine; if that fails we can fall back to using a tuner directly
-		if(settings.use_direct_tuning == false) {
+		else if(settings.use_direct_tuning == false) {
 			
 			streamurl = get_stream_url(dbhandle, channelid);
 			if(streamurl.length() == 0) log_notice(__func__, ": unable to generate storage engine stream URL for channel ", 
@@ -3631,14 +3385,28 @@ bool OpenLiveStream(PVR_CHANNEL const& channel)
 		// Stop and destroy any existing stream instance before opening the new one
 		g_dvrstream.reset();
 
-		// Start the new channel stream using the tuning parameters currently specified by the settings
-		log_notice(__func__, ": streaming channel ", channelstr, " via url ", streamurl.c_str());
-		g_dvrstream = dvrstream::create(streamurl.c_str(), settings.stream_ring_buffer_size, settings.stream_read_minimum_byte_count, settings.stream_read_timeout);
+		// Pause the scheduler if the user wants that functionality disabled during streaming
+		if(settings.pause_discovery_while_streaming) g_scheduler.pause();
+
+		try {
+
+			// Start the new channel stream using the tuning parameters currently specified by the settings
+			log_notice(__func__, ": streaming channel ", channelstr, " via url ", streamurl.c_str());
+			g_dvrstream = dvrstream::create(streamurl.c_str(), settings.stream_ring_buffer_size, settings.stream_read_chunk_size);
+		}
+
+		catch(...) { g_scheduler.resume(); throw; }
 
 		return true;
 	}
 
-	catch(std::exception& ex) { return handle_stdexception(__func__, ex, false); }
+	// Queue a notification for the user when a live stream cannot be opened, don't just silently log it
+	catch(std::exception& ex) { 
+		
+		g_addon->QueueNotification(ADDON::queue_msg_t::QUEUE_ERROR, "Live Stream creation failed (%s).", ex.what());
+		return handle_stdexception(__func__, ex, false); 
+	}
+
 	catch(...) { return handle_generalexception(__func__, false); }
 }
 
@@ -3691,9 +3459,11 @@ void CloseLiveStream(void)
 
 int ReadLiveStream(unsigned char* buffer, unsigned int size)
 {
-	try { return (g_dvrstream) ? static_cast<int>(g_dvrstream->read(buffer, size)) : -1; }
-	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
-	catch(...) { return handle_generalexception(__func__, -1); }
+	// NOTE: This disobeys the API and returns 0 instead of -1 on an error/exception.
+	// Returning -1 does not appear to be sufficient to stop Kodi from calling this again
+	try { return (g_dvrstream) ? static_cast<int>(g_dvrstream->read(buffer, size)) : 0; }
+	catch(std::exception& ex) { return handle_stdexception(__func__, ex, 0); }
+	catch(...) { return handle_generalexception(__func__, 0); }
 }
 
 //---------------------------------------------------------------------------
@@ -3708,7 +3478,47 @@ int ReadLiveStream(unsigned char* buffer, unsigned int size)
 
 long long SeekLiveStream(long long position, int whence)
 {
-	try { return (g_dvrstream) ? g_dvrstream->seek(position, whence) : -1; }
+	assert(g_addon);
+
+	if(!g_dvrstream) return -1;
+
+	// Save the current stream position in order to make an attempt to recover the stream on exception
+	long long current = g_dvrstream->position();
+
+	// Attempt to seek to the specified position
+	try { return g_dvrstream->seek(position, whence); }
+
+	// If an expected exception type (like http_exception) has been thrown, attempt stream recovery
+	catch(std::exception& ex) {
+
+		// Log the seek operation failure and indicate at what position the recovery attempt will be made
+		log_error(__func__, ": seek operation (positiion=", position, ", whence=", whence, ") failed with exception: ", ex.what(), ". Attempting recovery at position ", current);
+
+		// Alert the user that a seek failure has occurred with an error notification
+		g_addon->QueueNotification(ADDON::queue_msg_t::QUEUE_ERROR, "Live Stream seek operation failed (%s).", ex.what());
+
+		// Attempt to recover the stream by seeking to the previous current position
+		try { return g_dvrstream->seek(current, SEEK_SET); }
+		catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
+		catch(...) { return handle_generalexception(__func__, -1); }
+	}
+
+	catch(...) { return handle_generalexception(__func__, -1); }
+}
+
+//---------------------------------------------------------------------------
+// PositionLiveStream
+//
+// Gets the position in the stream that's currently being read
+//
+// Arguments:
+//
+//	NONE
+
+long long PositionLiveStream(void)
+{
+	// Don't report the position for a real-time stream
+	try { return (g_dvrstream && !g_dvrstream->realtime()) ? g_dvrstream->position() : -1; }
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
 	catch(...) { return handle_generalexception(__func__, -1); }
 }
@@ -3768,9 +3578,22 @@ PVR_ERROR GetDescrambleInfo(PVR_DESCRAMBLE_INFO* /*descrambleinfo*/)
 //	props		- Array of properties to be set for the stream
 //	numprops	- Number of properties returned by this function
 
-PVR_ERROR GetChannelStreamProperties(PVR_CHANNEL const* /*channel*/, PVR_NAMED_VALUE* /*props*/, unsigned int* /*numprops*/)
+PVR_ERROR GetChannelStreamProperties(PVR_CHANNEL const* /*channel*/, PVR_NAMED_VALUE* props, unsigned int* numprops)
 {
-	return PVR_ERROR_NOT_IMPLEMENTED;
+	// Copy out the current state of the PVR client settings
+	struct addon_settings settings = copy_settings();
+
+	// PVR_STREAM_PROPERTY_MIMETYPE
+	snprintf(props[0].strName, std::extent<decltype(props[0].strName)>::value, PVR_STREAM_PROPERTY_MIMETYPE);
+	snprintf(props[0].strValue, std::extent<decltype(props[0].strName)>::value, "video/mp2t");
+
+	// PVR_STREAM_PROPERTY_ISREALTIMESTREAM
+	snprintf(props[1].strName, std::extent<decltype(props[1].strName)>::value, PVR_STREAM_PROPERTY_ISREALTIMESTREAM);
+	snprintf(props[1].strValue, std::extent<decltype(props[1].strName)>::value, (g_dvrstream && g_dvrstream->realtime()) ? "true" : "false");
+
+	*numprops = 2;
+
+	return PVR_ERROR::PVR_ERROR_NO_ERROR;
 }
 
 //---------------------------------------------------------------------------
@@ -3784,9 +3607,19 @@ PVR_ERROR GetChannelStreamProperties(PVR_CHANNEL const* /*channel*/, PVR_NAMED_V
 //	props		- Array of properties to be set for the stream
 //	numprops	- Number of properties returned by this function
 
-PVR_ERROR GetRecordingStreamProperties(PVR_RECORDING const* /*recording*/, PVR_NAMED_VALUE* /*props*/, unsigned int* /*numprops*/)
+PVR_ERROR GetRecordingStreamProperties(PVR_RECORDING const* /*recording*/, PVR_NAMED_VALUE* props, unsigned int* numprops)
 {
-	return PVR_ERROR_NOT_IMPLEMENTED;
+	// PVR_STREAM_PROPERTY_MIMETYPE
+	snprintf(props[0].strName, std::extent<decltype(props[0].strName)>::value, PVR_STREAM_PROPERTY_MIMETYPE);
+	snprintf(props[0].strValue, std::extent<decltype(props[0].strName)>::value, "video/mp2t");
+
+	// PVR_STREAM_PROPERTY_ISREALTIMESTREAM
+	snprintf(props[1].strName, std::extent<decltype(props[1].strName)>::value, PVR_STREAM_PROPERTY_ISREALTIMESTREAM);
+	snprintf(props[1].strValue, std::extent<decltype(props[1].strName)>::value, "false");
+
+	*numprops = 2;
+
+	return PVR_ERROR::PVR_ERROR_NO_ERROR;
 }
 
 //---------------------------------------------------------------------------
@@ -3818,7 +3651,11 @@ PVR_ERROR GetStreamReadChunkSize(int* chunksize)
 {
 	if(chunksize == nullptr) return PVR_ERROR::PVR_ERROR_INVALID_PARAMETERS;
 
-	return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
+	// Create a copy of the current addon settings structure
+	struct addon_settings settings = copy_settings();
+	*chunksize = settings.stream_read_chunk_size;
+
+	return PVR_ERROR::PVR_ERROR_NO_ERROR;
 }
 
 //---------------------------------------------------------------------------
@@ -3832,6 +3669,8 @@ PVR_ERROR GetStreamReadChunkSize(int* chunksize)
 
 bool OpenRecordedStream(PVR_RECORDING const& recording)
 {
+	assert(g_addon);
+
 	// Create a copy of the current addon settings structure
 	struct addon_settings settings = copy_settings();
 
@@ -3847,14 +3686,28 @@ bool OpenRecordedStream(PVR_RECORDING const& recording)
 		// Stop and destroy any existing stream instance before opening the new one
 		g_dvrstream.reset();
 
-		// Start the new recording stream using the tuning parameters currently specified by the settings
-		log_notice(__func__, ": streaming recording ", recording.strTitle, " via url ", streamurl.c_str());
-		g_dvrstream = dvrstream::create(streamurl.c_str(), settings.stream_ring_buffer_size, settings.stream_read_minimum_byte_count, settings.stream_read_timeout);
+		// Pause the scheduler if the user wants that functionality disabled during streaming
+		if(settings.pause_discovery_while_streaming) g_scheduler.pause();
+
+		try {
+
+			// Start the new recording stream using the tuning parameters currently specified by the settings
+			log_notice(__func__, ": streaming recording ", recording.strTitle, " via url ", streamurl.c_str());
+			g_dvrstream = dvrstream::create(streamurl.c_str(), settings.stream_ring_buffer_size, settings.stream_read_chunk_size);
+		}
+
+		catch(...) { g_scheduler.resume(); throw; }
 
 		return true;
 	}
 
-	catch(std::exception& ex) { return handle_stdexception(__func__, ex, false); }
+	// Queue a notification for the user when a recorded stream cannot be opened, don't just silently log it
+	catch(std::exception& ex) { 
+		
+		g_addon->QueueNotification(ADDON::queue_msg_t::QUEUE_ERROR, "Recorded Stream creation failed (%s).", ex.what());
+		return handle_stdexception(__func__, ex, false); 
+	}
+
 	catch(...) { return handle_generalexception(__func__, false); }
 }
 
@@ -3907,9 +3760,11 @@ void CloseRecordedStream(void)
 
 int ReadRecordedStream(unsigned char* buffer, unsigned int size)
 {
-	try { return (g_dvrstream) ? static_cast<int>(g_dvrstream->read(buffer, size)) : -1; }
-	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
-	catch(...) { return handle_generalexception(__func__, -1); }
+	// NOTE: This disobeys the API and returns 0 instead of -1 on an error/exception.
+	// Returning -1 does not appear to be sufficient to stop Kodi from calling this again
+	try { return (g_dvrstream) ? static_cast<int>(g_dvrstream->read(buffer, size)) : 0; }
+	catch(std::exception& ex) { return handle_stdexception(__func__, ex, 0); }
+	catch(...) { return handle_generalexception(__func__, 0); }
 }
 
 //---------------------------------------------------------------------------
@@ -4097,7 +3952,19 @@ char const* GetBackendHostname(void)
 
 bool IsTimeshifting(void)
 {
-	return false;
+	// Only realtime streams are capable of timeshifting
+	if(!g_dvrstream || !g_dvrstream->realtime()) return false;
+
+	try {
+
+		// Get the calculated playback time of the stream.  If non-zero and is
+		// less than the current time (less one second for padding), it's timeshifting
+		time_t currenttime = g_dvrstream->currenttime();
+		return ((currenttime != 0) && (currenttime < (time(nullptr) - 1)));
+	}
+
+	catch(std::exception& ex) { return handle_stdexception(__func__, ex, false); }
+	catch(...) { return handle_generalexception(__func__, false); }
 }
 
 //---------------------------------------------------------------------------
@@ -4111,10 +3978,6 @@ bool IsTimeshifting(void)
 
 bool IsRealTimeStream(void)
 {
-	// The realtime indicator can be shut down completely via an option
-	struct addon_settings settings = copy_settings();
-	if(settings.disable_realtime_indicator) return false;
-
 	try { return (g_dvrstream) ? g_dvrstream->realtime() : false; }
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, false); }
 	catch(...) { return handle_generalexception(__func__, false); }
@@ -4146,9 +4009,11 @@ PVR_ERROR SetEPGTimeFrame(int days)
 
 void OnSystemSleep()
 {
+	// CAUTION: This function will be called on a different thread than the main PVR
+	// callback functions -- do not attempt to manipulate any in-progress streams
+
 	try {
 
-		g_dvrstream.reset();			// Destroy any active stream instance
 		g_scheduler.stop();				// Stop the scheduler
 		g_scheduler.clear();			// Clear out any pending tasks
 	}
@@ -4168,6 +4033,9 @@ void OnSystemSleep()
 
 void OnSystemWake()
 {
+	// CAUTION: This function will be called on a different thread than the main PVR
+	// callback functions -- do not attempt to manipulate any in-progress streams
+
 	// Create a copy of the current addon settings structure
 	struct addon_settings settings = copy_settings();
 
@@ -4219,9 +4087,23 @@ void OnPowerSavingDeactivated()
 //
 // Temporary function to be removed in later PVR API version
 
-PVR_ERROR GetStreamTimes(PVR_STREAM_TIMES* /*times*/)
+PVR_ERROR GetStreamTimes(PVR_STREAM_TIMES* times)
 {
-	return PVR_ERROR_NOT_IMPLEMENTED;
+	assert(times != nullptr);
+
+	// For non-realtime streams, let Kodi figure this out on it's own; it can do a better job
+	if((!g_dvrstream) || (!g_dvrstream->realtime()))  return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
+
+	times->startTime = g_dvrstream->starttime();
+
+	// TODO: Still not certain this is correct for GetStreamTimes(), but based on the code
+	// in VideoPlayer.cpp and a great deal of trial and error, setting the start and begin pts
+	// both to zero and the setting the end in microseconds seems to work acceptably for now
+	times->ptsStart = 0;
+	times->ptsBegin = 0;
+	times->ptsEnd = (static_cast<int64_t>(time(nullptr) - g_dvrstream->starttime())) * 1000000;		// <-- microseconds
+
+	return PVR_ERROR::PVR_ERROR_NO_ERROR;
 }
 
 //---------------------------------------------------------------------------

@@ -75,6 +75,9 @@
     <Filter Include="External Libraries\curl\Header Files\vtls">
       <UniqueIdentifier>{e56da373-3dc0-454b-95af-4aad83a1debb}</UniqueIdentifier>
     </Filter>
+    <Filter Include="External Libraries\http-status-codes-cpp">
+      <UniqueIdentifier>{2fa04bb4-37fd-42ec-831b-1f8e595765b2}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="stdafx.h">
@@ -469,6 +472,24 @@
     </ClInclude>
     <ClInclude Include="..\depends\libhdhomerun\hdhomerun_types.h">
       <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="curlshare.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="http_exception.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\depends\curl\lib\curl_ctype.h">
+      <Filter>External Libraries\curl\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\depends\curl\lib\curl_path.h">
+      <Filter>External Libraries\curl\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\depends\curl\lib\curl_range.h">
+      <Filter>External Libraries\curl\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\depends\http-status-codes-cpp\HttpStatusCodes_C++11.h">
+      <Filter>External Libraries\http-status-codes-cpp</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -920,6 +941,18 @@
       <Filter>External Libraries\curl\Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\depends\curl\lib\x509asn1.c">
+      <Filter>External Libraries\curl\Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="curlshare.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\depends\curl\lib\curl_ctype.c">
+      <Filter>External Libraries\curl\Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\depends\curl\lib\curl_path.c">
+      <Filter>External Libraries\curl\Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\depends\curl\lib\curl_range.c">
       <Filter>External Libraries\curl\Source Files</Filter>
     </ClCompile>
   </ItemGroup>

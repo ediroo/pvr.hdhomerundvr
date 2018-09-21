@@ -430,8 +430,6 @@ static const PVR_TIMER_TYPE g_timertypes[] ={
 
 		// iAttributes
 		//
-		// todo: PVR_TIMER_TYPE_REQUIRES_EPG_SERIESLINK_ON_CREATE can be set here, but seems to have bugs right now, after Kodi
-		// is stopped and restarted, the cached EPG data prevents adding a new timer if this is set
 		PVR_TIMER_TYPE_IS_REPEATING | PVR_TIMER_TYPE_SUPPORTS_CHANNELS | PVR_TIMER_TYPE_SUPPORTS_RECORD_ONLY_NEW_EPISODES | 
 			PVR_TIMER_TYPE_SUPPORTS_START_END_MARGIN | PVR_TIMER_TYPE_REQUIRES_EPG_SERIES_ON_CREATE | PVR_TIMER_TYPE_SUPPORTS_ANY_CHANNEL,
 
@@ -461,8 +459,6 @@ static const PVR_TIMER_TYPE g_timertypes[] ={
 
 		// iAttributes
 		//
-		// todo: PVR_TIMER_TYPE_REQUIRES_EPG_SERIESLINK_ON_CREATE can be set here, but seems to have bugs right now, after Kodi
-		// is stopped and restarted, the cached EPG data prevents adding a new timer if this is set
 		PVR_TIMER_TYPE_SUPPORTS_CHANNELS | PVR_TIMER_TYPE_SUPPORTS_START_END_MARGIN | PVR_TIMER_TYPE_REQUIRES_EPG_SERIES_ON_CREATE,
 
 		// strDescription
@@ -850,13 +846,40 @@ static void discover_startup_task(scalar_condition<bool> const& /*cancel*/)
 		// Pull a database connection out from the connection pool
 		connectionpool::handle dbhandle(g_connpool);
 
-		// Discover all of the local device and backend service data
-		discover_devices(dbhandle, settings.use_broadcast_device_discovery);
-		discover_lineups(dbhandle, lineups_changed);
-		discover_recordings(dbhandle, recordings_changed);
-		discover_guide(dbhandle, guide_changed);
-		discover_recordingrules(dbhandle, recordingrules_changed);
-		discover_episodes(dbhandle, episodes_changed);
+		// Discover all of the local device and backend service data -- failures here are not
+		// fatal and will just be logged rather than aborting all of the discovery tasks
+
+		// DISCOVER: Devices
+		try { discover_devices(dbhandle, settings.use_broadcast_device_discovery); }
+		catch(std::exception& ex) { handle_stdexception(__func__, ex); }
+		catch(...) { handle_generalexception(__func__); }
+
+		// DISCOVER: Lineups
+		try { discover_lineups(dbhandle, lineups_changed); }
+		catch(std::exception& ex) { handle_stdexception(__func__, ex); }
+		catch(...) { handle_generalexception(__func__); }
+
+		// DISCOVER: Recordings
+		try { discover_recordings(dbhandle, recordings_changed); }
+		catch(std::exception& ex) { handle_stdexception(__func__, ex); }
+		catch(...) { handle_generalexception(__func__); }
+
+		// DISCOVER: Guide Metadata
+		try { discover_guide(dbhandle, guide_changed); }
+		catch(std::exception& ex) { handle_stdexception(__func__, ex); }
+		catch(...) { handle_generalexception(__func__); }
+
+		// DISCOVER: Recording Rules
+		try { discover_recordingrules(dbhandle, recordingrules_changed); }
+		catch(std::exception& ex) { handle_stdexception(__func__, ex); }
+		catch(...) { handle_generalexception(__func__); }
+
+		// DISCOVER: Episodes
+		try { discover_episodes(dbhandle, episodes_changed); }
+		catch(std::exception& ex) { handle_stdexception(__func__, ex); }
+		catch(...) { handle_generalexception(__func__); }
+
+		// Execute any necessary triggers based on what discovery data has changed
 
 		// TRIGGER: Channels
 		if(lineups_changed || guide_changed) {
@@ -2256,7 +2279,7 @@ PVR_ERROR GetEPGTagStreamProperties(EPG_TAG const* /*tag*/, PVR_NAMED_VALUE* /*p
 
 int GetChannelGroupsAmount(void)
 {
-	return 3;		// "Favorite Channels", "HD Channels" and "SD Channels"
+	return 4;		// "Favorite Channels", "HD Channels", "SD Channels" and "Demo Channels"
 }
 
 //---------------------------------------------------------------------------
@@ -2293,6 +2316,10 @@ PVR_ERROR GetChannelGroups(ADDON_HANDLE handle, bool radio)
 	snprintf(group.strGroupName, std::extent<decltype(group.strGroupName)>::value, "SD Channels");
 	g_pvr->TransferChannelGroup(handle, &group);
 
+	// Demo Channels
+	snprintf(group.strGroupName, std::extent<decltype(group.strGroupName)>::value, "Demo Channels");
+	g_pvr->TransferChannelGroup(handle, &group);
+
 	return PVR_ERROR::PVR_ERROR_NO_ERROR;
 }
 
@@ -2312,12 +2339,13 @@ PVR_ERROR GetChannelGroupMembers(ADDON_HANDLE handle, PVR_CHANNEL_GROUP const& g
 
 	if(handle == nullptr) return PVR_ERROR::PVR_ERROR_INVALID_PARAMETERS;
 
-	// Determine which group enumerator to use for the operation, there are only
-	// three to choose from: "Favorite Channels", "HD Channels" and "SD Channels"
+	// Determine which group enumerator to use for the operation, there are only four to
+	// choose from: "Favorite Channels", "HD Channels", "SD Channels" and "Demo Channels"
 	std::function<void(sqlite3*, bool, enumerate_channelids_callback)> enumerator = nullptr;
 	if(strcmp(group.strGroupName, "Favorite Channels") == 0) enumerator = enumerate_favorite_channelids;
 	else if(strcmp(group.strGroupName, "HD Channels") == 0) enumerator = enumerate_hd_channelids;
 	else if(strcmp(group.strGroupName, "SD Channels") == 0) enumerator = enumerate_sd_channelids;
+	else if(strcmp(group.strGroupName, "Demo Channels") == 0) enumerator = enumerate_demo_channelids;
 
 	// If neither enumerator was selected, there isn't any work to do here
 	if(enumerator == nullptr) return PVR_ERROR::PVR_ERROR_NO_ERROR;
@@ -2391,7 +2419,10 @@ PVR_ERROR OpenDialogChannelScan(void)
 
 int GetChannelsAmount(void)
 {
-	try { return get_channel_count(connectionpool::handle(g_connpool), copy_settings().show_drm_protected_channels); }
+	// Create a copy of the current addon settings structure
+	struct addon_settings settings = copy_settings();
+
+	try { return get_channel_count(connectionpool::handle(g_connpool), settings.show_drm_protected_channels); }
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
 	catch(...) { return handle_generalexception(__func__, -1); }
 }
@@ -3094,9 +3125,6 @@ PVR_ERROR AddTimer(PVR_TIMER const& timer)
 		// Pull a database connection out from the connection pool
 		connectionpool::handle dbhandle(g_connpool);
 
-		// todo: can use strSeriesLink here for EPG timers instead of searching, once that works properly in Kodi.
-		// Right now the strSeriesLink information seems to disappear after Kodi is stopped and restarted
-
 		// seriesrule / epgseriesrule --> recordingrule_type::series
 		//
 		if((timer.iTimerType == timer_type::seriesrule) || (timer.iTimerType == timer_type::epgseriesrule)) {
@@ -3132,8 +3160,12 @@ PVR_ERROR AddTimer(PVR_TIMER const& timer)
 			//
 			else {
 
-				// Perform an exact-match search against the backend to locate the seriesid
-				seriesid = find_seriesid(dbhandle, timer.strEpgSearchString);
+				// Get the seriesid for the recording rule; if one has been specified as part of the timer request use it.
+				// Otherwise search for it with a title match against the backend services
+				seriesid.assign(timer.strSeriesLink);
+				if(seriesid.length() == 0) seriesid = find_seriesid(dbhandle, timer.strEpgSearchString);
+
+				// If no match was found, the timer cannot be added; use a dialog box rather than returning an error
 				if(seriesid.length() == 0) {
 					
 					g_gui->Dialog_OK_ShowAndGetInput("Series Search Failed", "Unable to locate a series with a title matching:", timer.strEpgSearchString, "");
@@ -3161,8 +3193,10 @@ PVR_ERROR AddTimer(PVR_TIMER const& timer)
 			union channelid channelid;
 			channelid.value = (timer.iClientChannelUid == PVR_TIMER_ANY_CHANNEL) ? 0 : timer.iClientChannelUid;
 
-			// Try to find the seriesid for the recording rule by the channel and starttime first, then do a title match
-			seriesid = find_seriesid(dbhandle, channelid, timer.startTime);
+			// Get the seriesid for the recording rule; if one has been specified as part of the timer request use it.
+			// Otherwise search for it first by channel and start time, falling back to a title match if necessary
+			seriesid.assign(timer.strSeriesLink);
+			if(seriesid.length() == 0) seriesid = find_seriesid(dbhandle, channelid, timer.startTime);
 			if(seriesid.length() == 0) seriesid = find_seriesid(dbhandle, timer.strEpgSearchString);
 
 			// If no match was found, the timer cannot be added; use a dialog box rather than returning an error

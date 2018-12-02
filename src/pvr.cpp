@@ -51,6 +51,7 @@
 #include "hdhr.h"
 #include "scalar_condition.h"
 #include "scheduler.h"
+#include "sqlite_exception.h"
 #include "string_exception.h"
 
 #pragma warning(push, 4)
@@ -285,7 +286,8 @@ static const PVR_ADDON_CAPABILITIES g_capabilities = {
 	false,			// bSupportsRecordingsLifetimeChange
 	false,			// bSupportsDescrambleInfo
 	0,				// iRecordingsLifetimesSize
-	{ { 0, "" } }	// recordingsLifetimeValues
+	{ { 0, "" } },	// recordingsLifetimeValues
+	false,			// bSupportsAsyncEPGTransfer
 };
 
 // g_connpool
@@ -365,8 +367,7 @@ static const PVR_TIMER_TYPE g_timertypes[] ={
 
 	// timer_type::seriesrule
 	//
-	// Timer type for non-EPG series rules, requires a series name match operation to create. Also used when editing
-	// an existing recording rule as the EPG/seriesid information will not be available
+	// Timer type for non-EPG series rules, requires a series link or name match operation to create. Can be both edited and deleted.
 	{
 		// iID
 		timer_type::seriesrule,
@@ -394,14 +395,7 @@ static const PVR_TIMER_TYPE g_timertypes[] ={
 
 	// timer_type::datetimeonlyrule
 	//
-	// Timer type for non-EPG date time only rules, requires a series name match operation to create. Also used when editing
-	// an existing recording rule as the EPG/seriesid information will not be available
-	//
-	// TODO: Made read-only since there is no way to get it to display the proper date selector.  Making it one-shot or manual
-	// rather than repeating removes it from the Timer Rules area and causes other problems.  If Kodi allowed the date selector
-	// to be displayed I think that would suffice, and wouldn't be that difficult or disruptive to the Kodi code.  For now, the
-	// PVR_TIMER_TYPE_SUPPORTS_FIRST_DAY flag was added to show the date of the recording.  Unfortunately, this also means that
-	// the timer rule cannot be deleted, which sucks.
+	// Timer type for non-EPG date time only rules, requires a series link or name match operation to create. Cannot be edited but can be deleted.
 	{
 		// iID
 		timer_type::datetimeonlyrule,
@@ -409,7 +403,7 @@ static const PVR_TIMER_TYPE g_timertypes[] ={
 		// iAttributes
 		PVR_TIMER_TYPE_IS_REPEATING | PVR_TIMER_TYPE_IS_READONLY | PVR_TIMER_TYPE_SUPPORTS_CHANNELS | PVR_TIMER_TYPE_SUPPORTS_TITLE_EPG_MATCH | 
 			PVR_TIMER_TYPE_SUPPORTS_FIRST_DAY | PVR_TIMER_TYPE_SUPPORTS_START_TIME | PVR_TIMER_TYPE_SUPPORTS_START_END_MARGIN | 
-			PVR_TIMER_TYPE_FORBIDS_EPG_TAG_ON_CREATE,
+			PVR_TIMER_TYPE_FORBIDS_EPG_TAG_ON_CREATE | PVR_TIMER_TYPE_SUPPORTS_READONLY_DELETE,
 
 		// strDescription
 		"Record Once Rule",
@@ -473,7 +467,7 @@ static const PVR_TIMER_TYPE g_timertypes[] ={
 	
 	// timer_type::seriestimer
 	//
-	// used for existing episode timers; these cannot be edited or deleted by the end user
+	// used for existing episode timers; these cannot be edited or deleted
 	{
 		// iID
 		timer_type::seriestimer,
@@ -494,14 +488,14 @@ static const PVR_TIMER_TYPE g_timertypes[] ={
 
 	// timer_type::datetimeonlytimer
 	//
-	// used for existing date/time only episode timers; these cannot be edited by the user, but allows the
-	// timer and it's associated parent rule to be deleted successfully via the live TV interface
+	// used for existing date/time only episode timers; these cannot be edited or deleted
 	{
 		// iID
 		timer_type::datetimeonlytimer,
 
 		// iAttributes
-		PVR_TIMER_TYPE_FORBIDS_NEW_INSTANCES | PVR_TIMER_TYPE_SUPPORTS_CHANNELS | PVR_TIMER_TYPE_SUPPORTS_START_TIME | PVR_TIMER_TYPE_SUPPORTS_END_TIME,
+		PVR_TIMER_TYPE_IS_READONLY | PVR_TIMER_TYPE_FORBIDS_NEW_INSTANCES | PVR_TIMER_TYPE_SUPPORTS_CHANNELS | PVR_TIMER_TYPE_SUPPORTS_START_TIME | 
+			PVR_TIMER_TYPE_SUPPORTS_END_TIME,
 		
 		// strDescription
 		"Record Once Episode",
@@ -1127,7 +1121,8 @@ static bool try_getepgforchannel(ADDON_HANDLE handle, PVR_CHANNEL const& channel
 			memset(&epgtag, 0, sizeof(EPG_TAG));				// Initialize the structure
 
 			// iUniqueBroadcastId (required)
-			epgtag.iUniqueBroadcastId = static_cast<unsigned int>(item.starttime);
+			assert(item.broadcastid > EPG_TAG_INVALID_UID);
+			epgtag.iUniqueBroadcastId = item.broadcastid;
 
 			// iUniqueChannelId (required)
 			epgtag.iUniqueChannelId = item.channelid;
@@ -1388,9 +1383,22 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 					menuhook.category = PVR_MENUHOOK_CHANNEL;
 					g_pvr->AddMenuHook(&menuhook);
 
-					// Create the global database connection pool instance, the file name is based on the versionb
-					std::string databasefile = "file:///" + std::string(pvrprops->strUserPath) + "/hdhomerundvr-v" + VERSION_VERSION2_ANSI + ".db";
-					g_connpool = std::make_shared<connectionpool>(databasefile.c_str(), SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_URI);
+					// Generate the local file system and URL-based file names for the PVR database, the file name is based on the version
+					std::string databasefile = std::string(pvrprops->strUserPath) + "/hdhomerundvr-v" + VERSION_VERSION2_ANSI + ".db";
+					std::string databasefileurl = "file:///" + databasefile;
+
+					// Create the global database connection pool instance
+					try { g_connpool = std::make_shared<connectionpool>(databasefileurl.c_str(), SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_URI); }
+					catch(sqlite_exception const& dbex) {
+
+						log_error(__func__, ": unable to create/open the PVR database ", databasefile, " - ", dbex.what());
+						
+						// If any SQLite-specific errors were thrown during database open/create, attempt to delete and recreate the database
+						log_notice(__func__, ": attempting to delete and recreate the PVR database");
+						g_addon->DeleteFile(databasefile.c_str());
+						g_connpool = std::make_shared<connectionpool>(databasefileurl .c_str(), SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_URI);
+						log_notice(__func__, ": successfully recreated the PVR database");
+					}
 
 					try {
 
@@ -2810,7 +2818,26 @@ PVR_ERROR SetRecordingLastPlayedPosition(PVR_RECORDING const& recording, int las
 
 int GetRecordingLastPlayedPosition(PVR_RECORDING const& recording)
 {
-	try { return get_recording_lastposition(connectionpool::handle(g_connpool), recording.strRecordingId); }
+	static std::string		previousRecordingId;		// The previously accessed recording id
+	static int				previousResult = -1;		// The previous result from this function
+
+	// NOTE: Kodi may call this function repeatedly if the user has a recording selected in the GUI in
+	// order to provide realtime status indicators. Acquiring the last played position is an expensive
+	// operation for this PVR -- if Kodi asks for the same information multiple times in a row, use the 
+	// previously determined results instead of executing the entire operation again
+
+	try {
+
+		// If multiple requests come in for the same recording, use the previously cached result
+		if(strcasecmp(recording.strRecordingId, previousRecordingId.c_str()) == 0) return previousResult;
+
+		// Different recording than the last one that was requested
+		previousRecordingId.assign(recording.strRecordingId);
+		previousResult = get_recording_lastposition(connectionpool::handle(g_connpool), recording.strRecordingId);
+		
+		return previousResult;
+	}
+
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
 	catch(...) { return handle_generalexception(__func__, -1); }
 }
@@ -3023,7 +3050,6 @@ PVR_ERROR GetTimers(ADDON_HANDLE handle)
 			snprintf(timer.strEpgSearchString, std::extent<decltype(timer.strEpgSearchString)>::value, "%s", item.title);
 
 			// firstDay
-			// TODO: This is a hack for datetimeonly rules so that they can show the date.  See comments above.
 			if(item.type == recordingrule_type::datetimeonly) timer.firstDay = item.datetimeonly;
 
 			// iPreventDuplicateEpisodes
@@ -3986,8 +4012,8 @@ char const* GetBackendHostname(void)
 
 bool IsTimeshifting(void)
 {
-	// Only realtime streams are capable of timeshifting
-	if(!g_dvrstream || !g_dvrstream->realtime()) return false;
+	// Only realtime seekable streams are capable of timeshifting
+	if(!g_dvrstream || !g_dvrstream->realtime() || !g_dvrstream->canseek()) return false;
 
 	try {
 
@@ -4126,7 +4152,7 @@ PVR_ERROR GetStreamTimes(PVR_STREAM_TIMES* times)
 	assert(times != nullptr);
 
 	// For non-realtime streams, let Kodi figure this out on it's own; it can do a better job
-	if((!g_dvrstream) || (!g_dvrstream->realtime()))  return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
+	if((!g_dvrstream) || (!g_dvrstream->realtime())) return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
 
 	times->startTime = g_dvrstream->starttime();
 

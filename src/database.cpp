@@ -595,7 +595,7 @@ void delete_recordingrule(sqlite3* instance, unsigned int recordingruleid)
 	catch(...) { try_execute_non_query(instance, "rollback transaction"); throw; }
 
 	// Poke the recording engine(s) after a successful rule change; don't worry about exceptions
-	try_execute_non_query(instance, "select http_request(json_extract(data, '$.BaseURL') || '/recording_events.post?sync') from device where type = 'storage");
+	try_execute_non_query(instance, "select http_request(json_extract(data, '$.BaseURL') || '/recording_events.post?sync') from device where type = 'storage'");
 }
 
 //---------------------------------------------------------------------------
@@ -1594,6 +1594,7 @@ void enumerate_guideentries(sqlite3* instance, union channelid channelid, time_t
 	auto sql = "with deviceauth(code) as (select url_encode(group_concat(json_extract(data, '$.DeviceAuth'), '')) from device) "
 		"select json_extract(entry.value, '$.SeriesID') as seriesid, "
 		"json_extract(entry.value, '$.Title') as title, "
+		"fnv_hash(?2, json_extract(value, '$.StartTime'), json_extract(value, '$.EndTime')) as broadcastid, "
 		"json_extract(entry.value, '$.StartTime') as starttime, "
 		"json_extract(entry.value, '$.EndTime') as endtime, "
 		"json_extract(entry.value, '$.Synopsis') as synopsis, "
@@ -1639,18 +1640,19 @@ void enumerate_guideentries(sqlite3* instance, union channelid channelid, time_t
 				struct guideentry item;
 				item.seriesid = reinterpret_cast<char const*>(sqlite3_column_text(statement, 0));
 				item.title = reinterpret_cast<char const*>(sqlite3_column_text(statement, 1));
+				item.broadcastid = static_cast<unsigned int>(sqlite3_column_int(statement, 2));
 				item.channelid = channelid.value;
-				item.starttime = static_cast<unsigned int>(sqlite3_column_int(statement, 2));
-				item.endtime = static_cast<unsigned int>(sqlite3_column_int(statement, 3));
-				item.synopsis = reinterpret_cast<char const*>(sqlite3_column_text(statement, 4));
-				item.year = sqlite3_column_int(statement, 5);
-				item.iconurl = reinterpret_cast<char const*>(sqlite3_column_text(statement, 6));
-				item.genretype = sqlite3_column_int(statement, 7);
-				item.genres = reinterpret_cast<char const*>(sqlite3_column_text(statement, 8));
-				item.originalairdate = sqlite3_column_int(statement, 9);
-				item.seriesnumber = sqlite3_column_int(statement, 10);
-				item.episodenumber = sqlite3_column_int(statement, 11);
-				item.episodename = reinterpret_cast<char const*>(sqlite3_column_text(statement, 12));
+				item.starttime = static_cast<unsigned int>(sqlite3_column_int(statement, 3));
+				item.endtime = static_cast<unsigned int>(sqlite3_column_int(statement, 4));
+				item.synopsis = reinterpret_cast<char const*>(sqlite3_column_text(statement, 5));
+				item.year = sqlite3_column_int(statement, 6);
+				item.iconurl = reinterpret_cast<char const*>(sqlite3_column_text(statement, 7));
+				item.genretype = sqlite3_column_int(statement, 8);
+				item.genres = reinterpret_cast<char const*>(sqlite3_column_text(statement, 9));
+				item.originalairdate = sqlite3_column_int(statement, 10);
+				item.seriesnumber = sqlite3_column_int(statement, 11);
+				item.episodenumber = sqlite3_column_int(statement, 12);
+				item.episodename = reinterpret_cast<char const*>(sqlite3_column_text(statement, 13));
 
 				// Move the starttime to the last seen endtime to continue the backend queries
 				if(item.endtime > starttime) starttime = item.endtime;
@@ -2490,11 +2492,12 @@ int get_recording_lastposition(sqlite3* instance, char const* recordingid)
 
 	if(instance == nullptr) return 0;
 
-	// Prepare a scalar result query to get the last played position of the recording from the storage engine
-	auto sql = "with httprequest(response) as (select http_request(json_extract(device.data, '$.StorageURL')) from device where device.type = 'storage') "
-		"select coalesce(json_extract(entry.value, '$.Resume'), 0) as resume from httprequest, json_each(httprequest.response) as entry "
-		"where json_extract(entry.value, '$.CmdURL') like ?1 limit 1";
-	
+	// Prepare a scalar result query to get the last played position of the recording from the storage engine. Limit the amount 
+	// of JSON that needs to be sifted through by specifically asking for the series that this recording belongs to
+	auto sql = "with httprequest(response) as (select http_request(json_extract(device.data, '$.StorageURL') || '?SeriesID=' || "
+		"(select json_extract(value, '$.SeriesID') as seriesid from recording, json_each(recording.data) where json_extract(value, '$.CmdURL') like ?1)) from device where device.type = 'storage') "
+		"select coalesce(json_extract(entry.value, '$.Resume'), 0) as resume from httprequest, json_each(httprequest.response) as entry where json_extract(entry.value, '$.CmdURL') like ?1 limit 1";
+
 	result = sqlite3_prepare_v2(instance, sql, -1, &statement, nullptr);
 	if(result != SQLITE_OK) throw sqlite_exception(result, sqlite3_errmsg(instance));
 

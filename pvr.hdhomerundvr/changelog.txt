@@ -1,7 +1,13 @@
-v1.3.7 (2018.12.xx)
-  - Update SQLite database engine to version 3.25.3
+v1.3.8 (2019.12.23)
+  - Add "Disable discovery of HDHomeRun RECORD devices" advanced setting
+  - Add "Use channel names from tuner device(s) in channel lineups" setting
+  - (Windows/UWP) Update Windows SDK and Platform Toolset versions
+
+v1.3.7 (2018.12.09)
+  - Update SQLite database engine to version 3.26.0
   - Update cURL library to version 7.62.0
   - Improve performance of Recorded TV last played (resume) position discovery
+  - Prevent reporting timeshift buffer information for non-seekable realtime streams
 
 v1.3.6 (2018.12.01)
   - Fix bug in DVR stream packet filter causing an access violation if a PSI packet with a table ID of 0xFF is encountered

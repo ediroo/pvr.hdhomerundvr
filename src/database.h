@@ -347,8 +347,8 @@ void delete_recordingrule(sqlite3* instance, unsigned int recordingruleid);
 // discover_devices
 //
 // Reloads the information about the available devices
-void discover_devices(sqlite3* instance, bool usebroadcast);
-void discover_devices(sqlite3* instance, bool usebroadcast, bool& changed);
+void discover_devices(sqlite3* instance, bool usebroadcast, bool excludestorage);
+void discover_devices(sqlite3* instance, bool usebroadcast, bool excludestorage, bool& changed);
 
 // discover_episodes
 //
@@ -383,7 +383,7 @@ void discover_recordings(sqlite3* instance, bool& changed);
 // enumerate_channels
 //
 // Enumerates the available channels
-void enumerate_channels(sqlite3* instance, bool prependnumbers, bool showdrm, enumerate_channels_callback callback);
+void enumerate_channels(sqlite3* instance, bool prependnumbers, bool showdrm, bool lineupnames, enumerate_channels_callback callback);
 
 // enumerate_channelids
 //

@@ -67,8 +67,8 @@ extern char const VERSION_VERSION3_ANSI[];
 
 void clean_filename(sqlite3_context* context, int argc, sqlite3_value** argv);
 void decode_channel_id(sqlite3_context* context, int argc, sqlite3_value** argv);
-bool discover_devices_broadcast(sqlite3* instance);
-bool discover_devices_http(sqlite3* instance);
+bool discover_devices_broadcast(sqlite3* instance, bool excludestorage);
+bool discover_devices_http(sqlite3* instance, bool excludestorage);
 void encode_channel_id(sqlite3_context* context, int argc, sqlite3_value** argv);
 void fnv_hash(sqlite3_context* context, int argc, sqlite3_value** argv);
 void generate_uuid(sqlite3_context* context, int argc, sqlite3_value** argv);
@@ -607,11 +607,12 @@ void delete_recordingrule(sqlite3* instance, unsigned int recordingruleid)
 //
 //	instance		- SQLite database instance
 //	usebroadcast	- Flag to use broadcast rather than HTTP discovery
+//	excludestorage	- Flag to exclude storage devices from discovery
 
-void discover_devices(sqlite3* instance, bool usebroadcast)
+void discover_devices(sqlite3* instance, bool usebroadcast, bool excludestorage)
 {
 	bool ignored;
-	return discover_devices(instance, usebroadcast, ignored);
+	return discover_devices(instance, usebroadcast, excludestorage, ignored);
 }
 
 //---------------------------------------------------------------------------
@@ -623,9 +624,10 @@ void discover_devices(sqlite3* instance, bool usebroadcast)
 //
 //	instance		- SQLite database instance
 //	usebroadcast	- Flag to use broadcast rather than HTTP discovery
+//	excludestorage	- Flag to exclude storage devices from discovery
 //	changed			- Flag indicating if the data has changed
 
-void discover_devices(sqlite3* instance, bool usebroadcast, bool& changed)
+void discover_devices(sqlite3* instance, bool usebroadcast, bool excludestorage, bool& changed)
 {
 	bool			hastuners = false;			// Flag indicating if any tuners were detected
 
@@ -641,7 +643,7 @@ void discover_devices(sqlite3* instance, bool usebroadcast, bool& changed)
 
 		// The logic required to load the temp table from broadcast differs greatly from the method
 		// used to load from the HTTP API; the specific mechanisms have been broken out into helpers
-		hastuners = (usebroadcast) ? discover_devices_broadcast(instance) : discover_devices_http(instance);
+		hastuners = (usebroadcast) ? discover_devices_broadcast(instance, excludestorage) : discover_devices_http(instance, excludestorage);
 
 		// If no tuner devices were found during discovery, throw an exception to abort the device discovery.
 		// The intention here is to prevent transient discovery problems from clearing out the existing devices
@@ -687,8 +689,9 @@ void discover_devices(sqlite3* instance, bool usebroadcast, bool& changed)
 // Arguments:
 //
 //	instance		- SQLite database instance
+//	excludestorage	- Flag to exclude storage devices from discovery
 
-bool discover_devices_broadcast(sqlite3* instance)
+bool discover_devices_broadcast(sqlite3* instance, bool excludestorage)
 {
 	bool					hastuners = false;		// Flag indicating tuners were found
 	sqlite3_stmt*			statement;				// SQL statement to execute
@@ -709,6 +712,9 @@ bool discover_devices_broadcast(sqlite3* instance)
 
 			// The presence or lack of tuner devices is used as the function return value
 			if(device.devicetype == device_type::tuner) hastuners = true;
+
+			// If the flag to exclude storage devices has been set, ignore them
+			if((excludestorage) && (device.devicetype == device_type::storage)) return;
 			
 			// Bind the query parameter(s)
 			result = sqlite3_bind_int(statement, 1, device.deviceid);
@@ -750,15 +756,17 @@ bool discover_devices_broadcast(sqlite3* instance)
 // Arguments:
 //
 //	instance		- SQLite database instance
+//	excludestorage	- Flag to exclude storage devices from discovery
 
-bool discover_devices_http(sqlite3* instance)
+bool discover_devices_http(sqlite3* instance, bool excludestorage)
 {
 	sqlite3_stmt*				statement;				// Database query statement
 	int							tuners = 0;				// Number of tuners found
 	int							result;					// Result from SQLite function call
 
 	assert(instance != nullptr);
-														//
+	
+	//
 	// NOTE: This had to be broken up into a multi-step query involving a temp table to avoid a SQLite bug/feature
 	// wherein using a function (http_request in this case) as part of a column definition is reevaluated when
 	// that column is subsequently used as part of a WHERE clause:
@@ -772,7 +780,11 @@ bool discover_devices_http(sqlite3* instance)
 		"coalesce(json_extract(discovery.value, '$.DeviceID'), json_extract(discovery.value, '$.StorageID')) as deviceid, "
 		"case when json_type(discovery.value, '$.DeviceID') is not null then 'tuner' when json_type(discovery.value, '$.StorageID') is not null then 'storage' else 'unknown' end as type, "
 		"http_request(json_extract(discovery.value, '$.DiscoverURL'), null) as data from json_each(http_request('http://api.hdhomerun.com/discover')) as discovery");
-	execute_non_query(instance, "insert into discover_device select deviceid, type, data from discover_device_http where data is not null and json_extract(data, '$.Legacy') is null");
+	
+	// Given that this is a multi-step operation, it's easier to use a different query altogether to exclude storage devices from discover_device
+	if(!excludestorage) execute_non_query(instance, "insert into discover_device select deviceid, type, data from discover_device_http where data is not null and json_extract(data, '$.Legacy') is null");
+	else execute_non_query(instance, "insert into discover_device select deviceid, type, data from discover_device_http where data is not null and json_extract(data, '$.StorageID') is null and json_extract(data, '$.Legacy') is null");
+
 	execute_non_query(instance, "drop table discover_device_http");
 
 	// Determine if any tuner devices were discovered from the HTTP discovery query
@@ -1212,9 +1224,10 @@ void encode_channel_id(sqlite3_context* context, int argc, sqlite3_value** argv)
 //	instance		- Database instance
 //	prependnumbers	- Flag to append the channel numbers
 //	showdrm			- Flag to show DRM channels
+//	lineupnames		- Flag to use names from the lineup not the EPG
 //	callback		- Callback function
 
-void enumerate_channels(sqlite3* instance, bool prependnumbers, bool showdrm, enumerate_channels_callback callback)
+void enumerate_channels(sqlite3* instance, bool prependnumbers, bool showdrm, bool lineupnames, enumerate_channels_callback callback)
 {
 	sqlite3_stmt*				statement;			// SQL statement to execute
 	int							result;				// Result from SQLite function
@@ -1225,11 +1238,11 @@ void enumerate_channels(sqlite3* instance, bool prependnumbers, bool showdrm, en
 	auto sql = "select "
 		"distinct(encode_channel_id(json_extract(entry.value, '$.GuideNumber'))) as channelid, "
 		"case when ?1 then json_extract(entry.value, '$.GuideNumber') || ' ' else '' end || "
-		"case when guide.channelid is null then json_extract(entry.value, '$.GuideName') else guide.channelname end as channelname, "
+		"case when (?2 or guide.channelid is null) then json_extract(entry.value, '$.GuideName') else guide.channelname end as channelname, "
 		"guide.iconurl as iconurl, "
 		"coalesce(json_extract(entry.value, '$.DRM'), 0) as drm "
 		"from lineup, json_each(lineup.data) as entry left outer join guide on encode_channel_id(json_extract(entry.value, '$.GuideNumber')) = guide.channelid "
-		"where nullif(json_extract(entry.value, '$.DRM'), ?2) is null "
+		"where nullif(json_extract(entry.value, '$.DRM'), ?3) is null "
 		"order by channelid";
 
 	result = sqlite3_prepare_v2(instance, sql, -1, &statement, nullptr);
@@ -1239,7 +1252,8 @@ void enumerate_channels(sqlite3* instance, bool prependnumbers, bool showdrm, en
 
 		// Bind the query parameters
 		result = sqlite3_bind_int(statement, 1, (prependnumbers) ? 1 : 0);
-		if(result == SQLITE_OK) result = sqlite3_bind_int(statement, 2, (showdrm) ? 1 : 0);
+		if(result == SQLITE_OK) result = sqlite3_bind_int(statement, 2, (lineupnames) ? 1 : 0);
+		if(result == SQLITE_OK) result = sqlite3_bind_int(statement, 3, (showdrm) ? 1 : 0);
 		if(result != SQLITE_OK) throw sqlite_exception(result);
 
 		// Execute the query and iterate over all returned rows

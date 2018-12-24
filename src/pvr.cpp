@@ -172,6 +172,11 @@ struct addon_settings {
 	// Flag indicating that DRM channels should be shown to the user
 	bool show_drm_protected_channels;
 
+	// use_channel_names_from_lineup
+	//
+	// Flag indicating that the channel names should come from the lineup not the EPG
+	bool use_channel_names_from_lineup;
+
 	// delete_datetime_rules_after
 	//
 	// Amount of time (seconds) after which an expired date/time rule is deleted
@@ -221,6 +226,11 @@ struct addon_settings {
 	//
 	// Indicates the number of seconds to pause before initiating the startup discovery task
 	int startup_discovery_task_delay;
+
+	// disable_storage_devices
+	//
+	// Indicates that HDHomeRun RECORD storage devices should be excluded from discovery
+	bool disable_storage_devices;
 
 	// stream_read_chunk_size
 	//
@@ -337,6 +347,7 @@ static addon_settings g_settings = {
 	false,					// prepend_episode_numbers_in_epg
 	false,					// use_backend_genre_strings
 	false,					// show_drm_protected_channels
+	false,					// use_channel_names_from_lineup
 	86400,					// delete_datetime_rules_after			default = 1 day
 	false,					// use_broadcast_device_discovery
 	300, 					// discover_devices_interval;			default = 5 minutes
@@ -347,6 +358,7 @@ static addon_settings g_settings = {
 	7200,					// discover_recordingrules_interval		default = 2 hours
 	false,					// use_direct_tuning
 	3,						// startup_discovery_task_delay
+	false,					// disable_storage_devices
 	(4 KiB),				// stream_read_chunk_size
 	(1 MiB),				// stream_ring_buffer_size
 	false,					// enable_recording_edl
@@ -576,7 +588,7 @@ static void discover_devices_task(scalar_condition<bool> const& cancel)
 		connectionpool::handle dbhandle(g_connpool);
 
 		// Discover the devices on the local network and check for changes
-		discover_devices(dbhandle, settings.use_broadcast_device_discovery, changed);
+		discover_devices(dbhandle, settings.use_broadcast_device_discovery, settings.disable_storage_devices, changed);
 
 		if(changed) {
 
@@ -844,7 +856,7 @@ static void discover_startup_task(scalar_condition<bool> const& /*cancel*/)
 		// fatal and will just be logged rather than aborting all of the discovery tasks
 
 		// DISCOVER: Devices
-		try { discover_devices(dbhandle, settings.use_broadcast_device_discovery); }
+		try { discover_devices(dbhandle, settings.use_broadcast_device_discovery, settings.disable_storage_devices); }
 		catch(std::exception& ex) { handle_stdexception(__func__, ex); }
 		catch(...) { handle_generalexception(__func__); }
 
@@ -1254,6 +1266,7 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 			if(g_addon->GetSetting("prepend_episode_numbers_in_epg", &bvalue)) g_settings.prepend_episode_numbers_in_epg = bvalue;
 			if(g_addon->GetSetting("use_backend_genre_strings", &bvalue)) g_settings.use_backend_genre_strings = bvalue;
 			if(g_addon->GetSetting("show_drm_protected_channels", &bvalue)) g_settings.show_drm_protected_channels = bvalue;
+			if(g_addon->GetSetting("use_channel_names_from_lineup", &bvalue)) g_settings.use_channel_names_from_lineup = bvalue;
 			if(g_addon->GetSetting("delete_datetime_rules_after", &nvalue)) g_settings.delete_datetime_rules_after = delete_expired_enum_to_seconds(nvalue);
 
 			// Load the discovery interval settings
@@ -1268,6 +1281,7 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 			// Load the advanced settings
 			if(g_addon->GetSetting("use_direct_tuning", &bvalue)) g_settings.use_direct_tuning = bvalue;
 			if(g_addon->GetSetting("startup_discovery_task_delay", &nvalue)) g_settings.startup_discovery_task_delay = nvalue;
+			if(g_addon->GetSetting("disable_storage_devices", &bvalue)) g_settings.disable_storage_devices = bvalue;
 			if(g_addon->GetSetting("stream_read_chunk_size", &nvalue)) g_settings.stream_read_chunk_size = chunksize_enum_to_bytes(nvalue);
 			if(g_addon->GetSetting("stream_ring_buffer_size", &nvalue)) g_settings.stream_ring_buffer_size = ringbuffersize_enum_to_bytes(nvalue);
 			if(g_addon->GetSetting("enable_recording_edl", &bvalue)) g_settings.enable_recording_edl = bvalue;
@@ -1410,7 +1424,7 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 							connectionpool::handle dbhandle(g_connpool);
 
 							log_notice(__func__, ": initiating local network resource discovery (startup)");
-							discover_devices(dbhandle, g_settings.use_broadcast_device_discovery);
+							discover_devices(dbhandle, g_settings.use_broadcast_device_discovery, g_settings.disable_storage_devices);
 							discover_lineups(dbhandle);
 						}
 
@@ -1612,6 +1626,20 @@ ADDON_STATUS ADDON_SetSetting(char const* name, void const* value)
 		}
 	}
 
+	// use_channel_names_from_lineup
+	//
+	else if(strcmp(name, "use_channel_names_from_lineup") == 0) {
+
+		bool bvalue = *reinterpret_cast<bool const*>(value);
+		if(bvalue != g_settings.use_channel_names_from_lineup) {
+
+			g_settings.use_channel_names_from_lineup = bvalue;
+			log_notice(__func__, ": setting use_channel_names_from_lineup changed to ", (bvalue) ? "true" : "false", " -- trigger channel and channel group updates");
+			g_pvr->TriggerChannelUpdate();
+			g_pvr->TriggerChannelGroupsUpdate();
+		}
+	}
+
 	// delete_datetime_rules_after
 	//
 	else if(strcmp(name, "delete_datetime_rules_after") == 0) {
@@ -1751,6 +1779,22 @@ ADDON_STATUS ADDON_SetSetting(char const* name, void const* value)
 
 			g_settings.startup_discovery_task_delay = nvalue;
 			log_notice(__func__, ": setting startup_discovery_task_delay changed to ", nvalue, " seconds");
+		}
+	}
+
+	// disable_storage_devices
+	//
+	else if(strcmp(name, "disable_storage_devices") == 0) {
+
+		bool bvalue = *reinterpret_cast<bool const*>(value);
+		if(bvalue != g_settings.disable_storage_devices) {
+
+			g_settings.disable_storage_devices = bvalue;
+			log_notice(__func__, ": setting disable_storage_devices changed to ", (bvalue) ? "true" : "false", " -- schedule device discovery");
+
+			// Reschedule the device discovery task to run as soon as possible
+			g_scheduler.remove(discover_devices_task);
+			g_scheduler.add(now + std::chrono::seconds(1), discover_devices_task);
 		}
 	}
 
@@ -2467,7 +2511,7 @@ PVR_ERROR GetChannels(ADDON_HANDLE handle, bool radio)
 		connectionpool::handle dbhandle(g_connpool);
 
 		// Enumerate all of the channels in the database
-		enumerate_channels(dbhandle, settings.prepend_channel_numbers, settings.show_drm_protected_channels, [&](struct channel const& item) -> void {
+		enumerate_channels(dbhandle, settings.prepend_channel_numbers, settings.show_drm_protected_channels, settings.use_channel_names_from_lineup, [&](struct channel const& item) -> void {
 
 			PVR_CHANNEL channel;								// PVR_CHANNEL to be transferred to Kodi
 			memset(&channel, 0, sizeof(PVR_CHANNEL));			// Initialize the structure
@@ -2818,26 +2862,7 @@ PVR_ERROR SetRecordingLastPlayedPosition(PVR_RECORDING const& recording, int las
 
 int GetRecordingLastPlayedPosition(PVR_RECORDING const& recording)
 {
-	static std::string		previousRecordingId;		// The previously accessed recording id
-	static int				previousResult = -1;		// The previous result from this function
-
-	// NOTE: Kodi may call this function repeatedly if the user has a recording selected in the GUI in
-	// order to provide realtime status indicators. Acquiring the last played position is an expensive
-	// operation for this PVR -- if Kodi asks for the same information multiple times in a row, use the 
-	// previously determined results instead of executing the entire operation again
-
-	try {
-
-		// If multiple requests come in for the same recording, use the previously cached result
-		if(strcasecmp(recording.strRecordingId, previousRecordingId.c_str()) == 0) return previousResult;
-
-		// Different recording than the last one that was requested
-		previousRecordingId.assign(recording.strRecordingId);
-		previousResult = get_recording_lastposition(connectionpool::handle(g_connpool), recording.strRecordingId);
-		
-		return previousResult;
-	}
-
+	try { return get_recording_lastposition(connectionpool::handle(g_connpool), recording.strRecordingId); }
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
 	catch(...) { return handle_generalexception(__func__, -1); }
 }
@@ -4151,17 +4176,16 @@ PVR_ERROR GetStreamTimes(PVR_STREAM_TIMES* times)
 {
 	assert(times != nullptr);
 
-	// For non-realtime streams, let Kodi figure this out on it's own; it can do a better job
-	if((!g_dvrstream) || (!g_dvrstream->realtime())) return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
+	// For non-realtime streams, let Kodi figure this out on it's own; it can do a better job.
+	// For non-seekable realtime streams this also needs to be blocked so Kodi won't try to seek on it
+	if((!g_dvrstream) || (!g_dvrstream->realtime()) || (!g_dvrstream->canseek())) return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
 
-	times->startTime = g_dvrstream->starttime();
+	times->startTime = g_dvrstream->starttime();	// Actual start time (wall clock UTC)
+	times->ptsStart = 0;							// Starting PTS gets set to zero
+	times->ptsBegin = 0;							// Timeshift buffer start PTS also gets set to zero
 
-	// TODO: Still not certain this is correct for GetStreamTimes(), but based on the code
-	// in VideoPlayer.cpp and a great deal of trial and error, setting the start and begin pts
-	// both to zero and the setting the end in microseconds seems to work acceptably for now
-	times->ptsStart = 0;
-	times->ptsBegin = 0;
-	times->ptsEnd = (static_cast<int64_t>(time(nullptr) - g_dvrstream->starttime())) * 1000000;		// <-- microseconds
+	// Set the timeshift buffer end time to the number of microseconds between now and actual start time
+	times->ptsEnd = (static_cast<int64_t>(time(nullptr) - g_dvrstream->starttime())) * DVD_TIME_BASE;
 
 	return PVR_ERROR::PVR_ERROR_NO_ERROR;
 }

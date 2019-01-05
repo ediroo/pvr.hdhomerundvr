@@ -63,7 +63,6 @@
 // MENUHOOK_XXXXXX
 //
 // Menu hook identifiers
-#define MENUHOOK_RECORD_DELETENORERECORD				1
 #define MENUHOOK_RECORD_DELETERERECORD					2
 #define MENUHOOK_SETTING_TRIGGERDEVICEDISCOVERY			3
 #define MENUHOOK_SETTING_TRIGGERLINEUPDISCOVERY			4
@@ -156,11 +155,6 @@ struct addon_settings {
 	//
 	// Flag to re-discover recordings immediately after playback has stopped
 	bool discover_recordings_after_playback;
-
-	// prepend_episode_numbers_in_epg
-	//
-	// Flag to prepend the episode number to the episode name in the EPG
-	bool prepend_episode_numbers_in_epg;
 
 	// use_backend_genre_strings
 	//
@@ -344,7 +338,6 @@ static addon_settings g_settings = {
 	false,					// prepend_channel_numbers
 	false,					// use_episode_number_as_title
 	false,					// discover_recordings_after_playback
-	false,					// prepend_episode_numbers_in_epg
 	false,					// use_backend_genre_strings
 	false,					// show_drm_protected_channels
 	false,					// use_channel_names_from_lineup
@@ -371,6 +364,16 @@ static addon_settings g_settings = {
 //
 // Synchronization object to serialize access to addon settings
 static std::mutex g_settings_lock;
+
+// g_stream_starttime
+//
+// Start time to report for the current stream
+static time_t g_stream_starttime = 0;
+
+// g_stream_endtime
+//
+// End time to report for the current stream
+static time_t g_stream_endtime = 0;
 
 // g_timertypes (const)
 //
@@ -1127,7 +1130,7 @@ static bool try_getepgforchannel(ADDON_HANDLE handle, PVR_CHANNEL const& channel
 		connectionpool::handle dbhandle(g_connpool);
 
 		// Enumerate all of the guide entries in the database for this channel and time frame
-		enumerate_guideentries(dbhandle, channelid, start, end, settings.prepend_episode_numbers_in_epg, [&](struct guideentry const& item) -> void {
+		enumerate_guideentries(dbhandle, channelid, start, end, [&](struct guideentry const& item) -> void {
 
 			EPG_TAG	epgtag;										// EPG_TAG to be transferred to Kodi
 			memset(&epgtag, 0, sizeof(EPG_TAG));				// Initialize the structure
@@ -1263,7 +1266,6 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 			if(g_addon->GetSetting("prepend_channel_numbers", &bvalue)) g_settings.prepend_channel_numbers = bvalue;
 			if(g_addon->GetSetting("use_episode_number_as_title", &bvalue)) g_settings.use_episode_number_as_title = bvalue;
 			if(g_addon->GetSetting("discover_recordings_after_playback", &bvalue)) g_settings.discover_recordings_after_playback = bvalue;
-			if(g_addon->GetSetting("prepend_episode_numbers_in_epg", &bvalue)) g_settings.prepend_episode_numbers_in_epg = bvalue;
 			if(g_addon->GetSetting("use_backend_genre_strings", &bvalue)) g_settings.use_backend_genre_strings = bvalue;
 			if(g_addon->GetSetting("show_drm_protected_channels", &bvalue)) g_settings.show_drm_protected_channels = bvalue;
 			if(g_addon->GetSetting("use_channel_names_from_lineup", &bvalue)) g_settings.use_channel_names_from_lineup = bvalue;
@@ -1301,15 +1303,7 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 		
 				try {
 
-					// PVR_MENUHOOK_TIMER
-					//
-					memset(&menuhook, 0, sizeof(PVR_MENUHOOK));
-					menuhook.iHookId = MENUHOOK_RECORD_DELETENORERECORD;
-					menuhook.iLocalizedStringId = 30301;
-					menuhook.category = PVR_MENUHOOK_RECORDING;
-					g_pvr->AddMenuHook(&menuhook);
-
-					// PVR_MENUHOOK_RECORDING
+					// MENUHOOK_RECORD_DELETERERECORD
 					//
 					memset(&menuhook, 0, sizeof(PVR_MENUHOOK));
 					menuhook.iHookId = MENUHOOK_RECORD_DELETERERECORD;
@@ -1426,6 +1420,9 @@ ADDON_STATUS ADDON_Create(void* handle, void* props)
 							log_notice(__func__, ": initiating local network resource discovery (startup)");
 							discover_devices(dbhandle, g_settings.use_broadcast_device_discovery, g_settings.disable_storage_devices);
 							discover_lineups(dbhandle);
+
+							// Alert the user if no tuner device(s) were found during startup or are cached in the database
+							if(get_tuner_count(dbhandle) == 0) g_addon->QueueNotification(ADDON::queue_msg_t::QUEUE_ERROR, "HDHomeRun tuner device(s) not detected");
 						}
 
 						// Failure to perform the synchronous device and lineup discovery is not fatal
@@ -1585,18 +1582,6 @@ ADDON_STATUS ADDON_SetSetting(char const* name, void const* value)
 
 			g_settings.discover_recordings_after_playback = bvalue;
 			log_notice(__func__, ": setting discover_recordings_after_playback changed to ", (bvalue) ? "true" : "false");
-		}
-	}
-
-	// prepend_episode_numbers_in_epg
-	//
-	else if(strcmp(name, "prepend_episode_numbers_in_epg") == 0) {
-
-		bool bvalue = *reinterpret_cast<bool const*>(value);
-		if(bvalue != g_settings.prepend_episode_numbers_in_epg) {
-
-			g_settings.prepend_episode_numbers_in_epg = bvalue;
-			log_notice(__func__, ": setting prepend_episode_numbers_in_epg changed to ", (bvalue) ? "true" : "false");
 		}
 	}
 
@@ -1976,23 +1961,9 @@ PVR_ERROR CallMenuHook(PVR_MENUHOOK const& menuhook, PVR_MENUHOOK_DATA const& it
 	// Get the current time to reschedule tasks as requested
 	std::chrono::time_point<std::chrono::system_clock> now = std::chrono::system_clock::now();
 
-	// MENUHOOK_RECORD_DELETENORERECORD
-	//
-	if((menuhook.iHookId == MENUHOOK_RECORD_DELETENORERECORD) && (item.cat == PVR_MENUHOOK_RECORDING)) {
-
-		// This is a standard deletion; you need at least 2 hooks to get the menu to appear otherwise the
-		// user will only see the text "Client actions" in the context menu
-		try { delete_recording(connectionpool::handle(g_connpool), item.data.recording.strRecordingId, false); }
-		catch(std::exception& ex) { return handle_stdexception(__func__, ex, PVR_ERROR::PVR_ERROR_FAILED); }
-		catch(...) { return handle_generalexception(__func__, PVR_ERROR::PVR_ERROR_FAILED); }
-
-		g_pvr->TriggerRecordingUpdate();
-		return PVR_ERROR::PVR_ERROR_NO_ERROR;
-	}
-
 	// MENUHOOK_RECORD_DELETERERECORD
 	//
-	else if((menuhook.iHookId == MENUHOOK_RECORD_DELETERERECORD) && (item.cat == PVR_MENUHOOK_RECORDING)) {
+	if((menuhook.iHookId == MENUHOOK_RECORD_DELETERERECORD) && (item.cat == PVR_MENUHOOK_RECORDING)) {
 
 		// Delete the recording with the re-record flag set to true
 		try { delete_recording(connectionpool::handle(g_connpool), item.data.recording.strRecordingId, true); }
@@ -3478,6 +3449,10 @@ bool OpenLiveStream(PVR_CHANNEL const& channel)
 			// Start the new channel stream using the tuning parameters currently specified by the settings
 			log_notice(__func__, ": streaming channel ", channelstr, " via url ", streamurl.c_str());
 			g_dvrstream = dvrstream::create(streamurl.c_str(), settings.stream_ring_buffer_size, settings.stream_read_chunk_size);
+
+			// For live streams, set the start time to now and set the end time to time_t::max()
+			g_stream_starttime = time(nullptr);
+			g_stream_endtime = std::numeric_limits<time_t>::max();
 		}
 
 		catch(...) { g_scheduler.resume(); throw; }
@@ -3526,6 +3501,9 @@ void CloseLiveStream(void)
 		// propagated before destroying it; destructor alone won't throw
 		if(g_dvrstream) g_dvrstream->close();
 		g_dvrstream.reset();
+
+		// Reset the global stream start and end time trackers
+		g_stream_starttime = g_stream_endtime = 0;
 	}
 
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex); }
@@ -3779,6 +3757,10 @@ bool OpenRecordedStream(PVR_RECORDING const& recording)
 			// Start the new recording stream using the tuning parameters currently specified by the settings
 			log_notice(__func__, ": streaming recording ", recording.strTitle, " via url ", streamurl.c_str());
 			g_dvrstream = dvrstream::create(streamurl.c_str(), settings.stream_ring_buffer_size, settings.stream_read_chunk_size);
+
+			// For recorded streams, set the start and end times based on the recording metadata
+			g_stream_starttime = recording.recordingTime;
+			g_stream_endtime = recording.recordingTime + recording.iDuration;
 		}
 
 		catch(...) { g_scheduler.resume(); throw; }
@@ -3827,6 +3809,9 @@ void CloseRecordedStream(void)
 		// propagated before destroying it; destructor alone won't throw
 		if(g_dvrstream) g_dvrstream->close();
 		g_dvrstream.reset();
+
+		// Reset the global stream start and end time trackers
+		g_stream_starttime = g_stream_endtime = 0;
 	}
 
 	catch(std::exception& ex) { return handle_stdexception(__func__, ex); }
@@ -4176,16 +4161,16 @@ PVR_ERROR GetStreamTimes(PVR_STREAM_TIMES* times)
 {
 	assert(times != nullptr);
 
-	// For non-realtime streams, let Kodi figure this out on it's own; it can do a better job.
-	// For non-seekable realtime streams this also needs to be blocked so Kodi won't try to seek on it
-	if((!g_dvrstream) || (!g_dvrstream->realtime()) || (!g_dvrstream->canseek())) return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
+	// Block this function for non-seekable streams otherwise Kodi will allow those operations
+	if((!g_dvrstream) || (!g_dvrstream->canseek())) return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
 
-	times->startTime = g_dvrstream->starttime();	// Actual start time (wall clock UTC)
+	times->startTime = g_stream_starttime;			// Actual start time (wall clock UTC)
 	times->ptsStart = 0;							// Starting PTS gets set to zero
 	times->ptsBegin = 0;							// Timeshift buffer start PTS also gets set to zero
 
-	// Set the timeshift buffer end time to the number of microseconds between now and actual start time
-	times->ptsEnd = (static_cast<int64_t>(time(nullptr) - g_dvrstream->starttime())) * DVD_TIME_BASE;
+	// Set the timeshift buffer end time to the lesser of the current wall clock time or the stream end time
+	time_t now = time(nullptr);
+	times->ptsEnd = (((now < g_stream_endtime) ? now : g_stream_endtime) - g_stream_starttime) * DVD_TIME_BASE;
 
 	return PVR_ERROR::PVR_ERROR_NO_ERROR;
 }

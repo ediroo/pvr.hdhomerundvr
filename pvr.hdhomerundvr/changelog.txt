@@ -1,3 +1,23 @@
+v1.3.12 (2019.02.02)
+  - Fix bug introduced in v1.3.11 that prevented EPG listings for channels with subchannels (x.x) from loading
+
+v1.3.11 (2019.02.02)
+  - Update libhdhomerun library to version 2018.10.27
+  - Use pipelined/multiplexed HTTP requests when accessing backend EPG data
+  - Fix bug introduced in v1.3.9 that caused different EPG broadcast IDs to be generated
+  - Fix bug introduced in v1.3.9 that caused invalid stream end times to be reported on 32-bit GCC platforms
+  - (Android) Restrict exported symbols to prevent name collisions with shared libraries
+
+v1.3.10 (2019.01.28)
+  - Add "Use simplified (flattened) file hierarchy" Edit Decision List (EDL) setting
+  - Add "Report CUT indicators as COMBREAK indicators" EDL setting
+  - Rename "Start time padding (milliseconds)" EDL setting to "CUT indicator start time padding (milliseconds)"
+  - Rename "End time padding (milliseconds)" EDL setting to "CUT indicator end time padding (milliseconds)"
+  - Correct improperly specified units of time from "ms" to "s" when logging the parsed EDL file entries
+  - Add log message indicating the expected path to an EDL file that could not be found
+  - (Windows/Android/OSX) Support automatic addon updates via custom repository
+  - Disable IPv6 DNS (AAAA record) lookups when querying the backend services
+
 v1.3.9 (2019.01.04)
   - Update cURL library to version 7.63.0
   - Remove "Prepend season/episode number to episode name in EPG" setting

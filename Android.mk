@@ -1,5 +1,5 @@
 #-----------------------------------------------------------------------------
-# Copyright (c) 2018 Michael G. Brehm
+# Copyright (c) 2016-2019 Michael G. Brehm
 # 
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -73,6 +73,9 @@ LOCAL_STATIC_LIBRARIES += \
 LOCAL_LDLIBS += \
 	-llog
 
+LOCAL_LDFLAGS += \
+	-Wl,--version-script=exportlist/exportlist.android
+
 LOCAL_SRC_FILES := \
 	depends/libhdhomerun/hdhomerun_channels.c \
 	depends/libhdhomerun/hdhomerun_channelscan.c \
@@ -96,3 +99,28 @@ LOCAL_SRC_FILES := \
 	src/sqlite_exception.cpp
 	
 include $(BUILD_SHARED_LIBRARY)
+
+# sqlite3
+#
+include $(CLEAR_VARS)
+LOCAL_MODULE := sqlite3
+
+LOCAL_C_INCLUDES += \
+	depends/sqlite
+	
+LOCAL_CFLAGS += \
+	-DSQLITE_ENABLE_JSON1=1
+	
+LOCAL_CPPFLAGS += \
+	-std=c++14 \
+	-Wall \
+	-Wno-unknown-pragmas
+	
+LOCAL_LDLIBS += \
+	-llog
+
+LOCAL_SRC_FILES := \
+	depends/sqlite/sqlite3.c \
+	depends/sqlite/shell.c
+	
+include $(BUILD_EXECUTABLE)

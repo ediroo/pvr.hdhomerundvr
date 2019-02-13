@@ -377,6 +377,13 @@ static addon_settings g_settings = {
 // Synchronization object to serialize access to addon settings
 static std::mutex g_settings_lock;
 
+// g_stream_close_hack
+//
+// Flag to help deal with starting the stream during GetStreamProperties() -- the PVR
+// always calls CloseStream() before calling OpenStream(), which stops and restarts
+// the stream unnecessarily
+static bool g_stream_close_hack = false;
+
 // g_stream_starttime
 //
 // Start time to report for the current stream
@@ -2724,6 +2731,7 @@ PVR_ERROR GetRecordings(ADDON_HANDLE handle, bool deleted)
 
 			// iDuration
 			recording.iDuration = item.duration;
+			assert(recording.iDuration > 0);
 
 			// iLastPlayedPosition
 			//
@@ -3424,6 +3432,9 @@ bool OpenLiveStream(PVR_CHANNEL const& channel)
 
 	assert(g_addon);
 
+	// The stream may have already been opened by a call to GetChannelStreamProperties()
+	if(g_dvrstream) return true;
+
 	// DRM channels are flagged with a non-zero iEncryptionSystem value to prevent streaming
 	if(channel.iEncryptionSystem != 0) {
 	
@@ -3481,9 +3492,6 @@ bool OpenLiveStream(PVR_CHANNEL const& channel)
 		// If none of the above methods yielded a valid URL, we're done here
 		if(streamurl.length() == 0) throw string_exception("unable to generate a valid stream URL for channel ", channelstr);
 
-		// Stop and destroy any existing stream instance before opening the new one
-		g_dvrstream.reset();
-
 		// Pause the scheduler if the user wants that functionality disabled during streaming
 		if(settings.pause_discovery_while_streaming) g_scheduler.pause();
 
@@ -3496,9 +3504,17 @@ bool OpenLiveStream(PVR_CHANNEL const& channel)
 			// For live streams, set the start time to now and set the end time to time_t::max()
 			g_stream_starttime = time(nullptr);
 			g_stream_endtime = std::numeric_limits<time_t>::max();
+
+			// Log some additional information about the stream for diagnostic purposes
+			log_notice(__func__, ": mediatype = ", g_dvrstream->mediatype());
+			log_notice(__func__, ": canseek   = ", g_dvrstream->canseek() ? "true" : "false");
+			log_notice(__func__, ": length    = ", g_dvrstream->length());
+			log_notice(__func__, ": realtime  = ", g_dvrstream->realtime() ? "true" : "false");
+			log_notice(__func__, ": starttime = ", g_stream_starttime, " (epoch) = ", strtok(asctime(localtime(&g_stream_starttime)), "\n"), " (local)");
+			// don't log end time here, asctime/localtime won't work if time_t is 64-bit on this platform
 		}
 
-		catch(...) { g_scheduler.resume(); throw; }
+		catch(...) { g_dvrstream.reset(); g_scheduler.resume(); throw; }
 
 		return true;
 	}
@@ -3524,6 +3540,10 @@ bool OpenLiveStream(PVR_CHANNEL const& channel)
 
 void CloseLiveStream(void)
 {
+	// Opening the stream in GetChannelStreamProperties has a side effect in that while the
+	// stream is already open, Kodi will still always call CloseLiveStream() before OpenLiveStream()
+	if(g_stream_close_hack) { g_stream_close_hack = false; return; }
+
 	try {
 		
 		// Create a copy of the current addon settings structure
@@ -3565,11 +3585,34 @@ void CloseLiveStream(void)
 
 int ReadLiveStream(unsigned char* buffer, unsigned int size)
 {
-	// NOTE: This disobeys the API and returns 0 instead of -1 on an error/exception.
-	// Returning -1 does not appear to be sufficient to stop Kodi from calling this again
-	try { return (g_dvrstream) ? static_cast<int>(g_dvrstream->read(buffer, size)) : 0; }
-	catch(std::exception& ex) { return handle_stdexception(__func__, ex, 0); }
-	catch(...) { return handle_generalexception(__func__, 0); }
+	assert(g_addon);
+
+	if(!g_dvrstream) return -1;
+
+	try { 
+	
+		// Attempt to read the requested number of bytes from the stream
+		int result = static_cast<int>(g_dvrstream->read(buffer, size));
+
+		// Live streams should always return data, log an error on any zero-length read
+		if(result == 0) log_error(__func__, ": zero-length read on stream at position ", g_dvrstream->position());
+
+		return result;
+	}
+
+	catch(std::exception& ex) {
+
+		// Log the exception and alert the user of the failure with an error notification
+		log_error(__func__, ": read operation failed with exception: ", ex.what());
+		g_addon->QueueNotification(ADDON::queue_msg_t::QUEUE_ERROR, "Unable to read from stream: %s", ex.what());
+
+		// Kodi is going to continue to call this function until it thinks the stream has ended so
+		// consume whatever data is left in the stream buffer until it returns zero enough times to stop
+		try { return static_cast<int>(g_dvrstream->read(buffer, size)); }
+		catch(...) { return 0; }
+	}
+
+	catch(...) { return handle_generalexception(__func__, -1); }
 }
 
 //---------------------------------------------------------------------------
@@ -3586,27 +3629,15 @@ long long SeekLiveStream(long long position, int whence)
 {
 	assert(g_addon);
 
-	if(!g_dvrstream) return -1;
+	try { return (g_dvrstream) ? g_dvrstream->seek(position, whence) : -1; }
 
-	// Save the current stream position in order to make an attempt to recover the stream on exception
-	long long current = g_dvrstream->position();
-
-	// Attempt to seek to the specified position
-	try { return g_dvrstream->seek(position, whence); }
-
-	// If an expected exception type (like http_exception) has been thrown, attempt stream recovery
 	catch(std::exception& ex) {
 
-		// Log the seek operation failure and indicate at what position the recovery attempt will be made
-		log_error(__func__, ": seek operation (positiion=", position, ", whence=", whence, ") failed with exception: ", ex.what(), ". Attempting recovery at position ", current);
+		// Log the exception and alert the user of the failure with an error notification
+		log_error(__func__, ": seek operation failed with exception: ", ex.what());
+		g_addon->QueueNotification(ADDON::queue_msg_t::QUEUE_ERROR, "Unable to seek stream: %s", ex.what());
 
-		// Alert the user that a seek failure has occurred with an error notification
-		g_addon->QueueNotification(ADDON::queue_msg_t::QUEUE_ERROR, "Live Stream seek operation failed (%s).", ex.what());
-
-		// Attempt to recover the stream by seeking to the previous current position
-		try { return g_dvrstream->seek(current, SEEK_SET); }
-		catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
-		catch(...) { return handle_generalexception(__func__, -1); }
+		return -1;
 	}
 
 	catch(...) { return handle_generalexception(__func__, -1); }
@@ -3676,7 +3707,7 @@ PVR_ERROR GetDescrambleInfo(PVR_DESCRAMBLE_INFO* /*descrambleinfo*/)
 //---------------------------------------------------------------------------
 // GetChannelStreamProperties
 //
-// Gets the properties for channel streams when the input stream is not handled
+// Get the stream properties for a channel from the backend
 //
 // Arguments:
 //
@@ -3684,20 +3715,29 @@ PVR_ERROR GetDescrambleInfo(PVR_DESCRAMBLE_INFO* /*descrambleinfo*/)
 //	props		- Array of properties to be set for the stream
 //	numprops	- Number of properties returned by this function
 
-PVR_ERROR GetChannelStreamProperties(PVR_CHANNEL const* /*channel*/, PVR_NAMED_VALUE* props, unsigned int* numprops)
+PVR_ERROR GetChannelStreamProperties(PVR_CHANNEL const* channel, PVR_NAMED_VALUE* props, unsigned int* numprops)
 {
+	// This function is called before OpenLiveStream() will be called, but the required properties are
+	// dynamic based on the stream metadata.  To fulfill the request, attempt to open the stream now
+	if((g_dvrstream) || (OpenLiveStream(*channel) == false)) return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
+	assert(g_dvrstream);
+
 	// Copy out the current state of the PVR client settings
 	struct addon_settings settings = copy_settings();
 
 	// PVR_STREAM_PROPERTY_MIMETYPE
 	snprintf(props[0].strName, std::extent<decltype(props[0].strName)>::value, PVR_STREAM_PROPERTY_MIMETYPE);
-	snprintf(props[0].strValue, std::extent<decltype(props[0].strName)>::value, "video/mp2t");
+	snprintf(props[0].strValue, std::extent<decltype(props[0].strName)>::value, "%s", g_dvrstream->mediatype());
 
 	// PVR_STREAM_PROPERTY_ISREALTIMESTREAM
 	snprintf(props[1].strName, std::extent<decltype(props[1].strName)>::value, PVR_STREAM_PROPERTY_ISREALTIMESTREAM);
-	snprintf(props[1].strValue, std::extent<decltype(props[1].strName)>::value, (g_dvrstream && g_dvrstream->realtime()) ? "true" : "false");
+	snprintf(props[1].strValue, std::extent<decltype(props[1].strName)>::value, (g_dvrstream->realtime() ? "true" : "false"));
 
 	*numprops = 2;
+
+	// Hack to prevent CloseLiveStream() from actually closing the stream since it was opened before 
+	// OpenLiveStream() has technically been called by Kodi
+	g_stream_close_hack = true;
 
 	return PVR_ERROR::PVR_ERROR_NO_ERROR;
 }
@@ -3705,7 +3745,7 @@ PVR_ERROR GetChannelStreamProperties(PVR_CHANNEL const* /*channel*/, PVR_NAMED_V
 //---------------------------------------------------------------------------
 // GetRecordingStreamProperties
 //
-// Gets the properties for recording streams when the input stream is not handled
+// Get the stream properties for a recording from the backend
 //
 // Arguments:
 //
@@ -3713,17 +3753,29 @@ PVR_ERROR GetChannelStreamProperties(PVR_CHANNEL const* /*channel*/, PVR_NAMED_V
 //	props		- Array of properties to be set for the stream
 //	numprops	- Number of properties returned by this function
 
-PVR_ERROR GetRecordingStreamProperties(PVR_RECORDING const* /*recording*/, PVR_NAMED_VALUE* props, unsigned int* numprops)
+PVR_ERROR GetRecordingStreamProperties(PVR_RECORDING const* recording, PVR_NAMED_VALUE* props, unsigned int* numprops)
 {
+	// This function is called before OpenRecordedStream() will be called, but the required properties are
+	// dynamic based on the stream metadata.  To fulfill the request, attempt to open the stream now
+	if((g_dvrstream) || (OpenRecordedStream(*recording) == false)) return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
+	assert(g_dvrstream);
+
+	// Copy out the current state of the PVR client settings
+	struct addon_settings settings = copy_settings();
+
 	// PVR_STREAM_PROPERTY_MIMETYPE
 	snprintf(props[0].strName, std::extent<decltype(props[0].strName)>::value, PVR_STREAM_PROPERTY_MIMETYPE);
-	snprintf(props[0].strValue, std::extent<decltype(props[0].strName)>::value, "video/mp2t");
+	snprintf(props[0].strValue, std::extent<decltype(props[0].strName)>::value, "%s", g_dvrstream->mediatype());
 
 	// PVR_STREAM_PROPERTY_ISREALTIMESTREAM
 	snprintf(props[1].strName, std::extent<decltype(props[1].strName)>::value, PVR_STREAM_PROPERTY_ISREALTIMESTREAM);
-	snprintf(props[1].strValue, std::extent<decltype(props[1].strName)>::value, "false");
+	snprintf(props[1].strValue, std::extent<decltype(props[1].strName)>::value, (g_dvrstream->realtime() ? "true" : "false"));
 
 	*numprops = 2;
+
+	// Hack to prevent CloseRecordedStream() from actually closing the stream since it was opened before 
+	// OpenRecordedStream() has technically been called by Kodi
+	g_stream_close_hack = true;
 
 	return PVR_ERROR::PVR_ERROR_NO_ERROR;
 }
@@ -3777,6 +3829,9 @@ bool OpenRecordedStream(PVR_RECORDING const& recording)
 {
 	assert(g_addon);
 
+	// The stream may have already been opened by a call to GetRecordingStreamProperties()
+	if(g_dvrstream) return true;
+
 	// Create a copy of the current addon settings structure
 	struct addon_settings settings = copy_settings();
 
@@ -3789,24 +3844,29 @@ bool OpenRecordedStream(PVR_RECORDING const& recording)
 		std::string streamurl = get_recording_stream_url(dbhandle, recording.strRecordingId);
 		if(streamurl.length() == 0) throw string_exception("unable to determine the URL for specified recording");
 
-		// Stop and destroy any existing stream instance before opening the new one
-		g_dvrstream.reset();
-
 		// Pause the scheduler if the user wants that functionality disabled during streaming
 		if(settings.pause_discovery_while_streaming) g_scheduler.pause();
 
 		try {
 
 			// Start the new recording stream using the tuning parameters currently specified by the settings
-			log_notice(__func__, ": streaming recording ", recording.strTitle, " via url ", streamurl.c_str());
+			log_notice(__func__, ": streaming recording '", recording.strTitle, "' via url ", streamurl.c_str());
 			g_dvrstream = dvrstream::create(streamurl.c_str(), settings.stream_ring_buffer_size, settings.stream_read_chunk_size);
 
 			// For recorded streams, set the start and end times based on the recording metadata
 			g_stream_starttime = recording.recordingTime;
 			g_stream_endtime = recording.recordingTime + recording.iDuration;
+
+			// Log some additional information about the stream for diagnostic purposes
+			log_notice(__func__, ": mediatype = ", g_dvrstream->mediatype());
+			log_notice(__func__, ": canseek   = ", g_dvrstream->canseek() ? "true" : "false");
+			log_notice(__func__, ": length    = ", g_dvrstream->length());
+			log_notice(__func__, ": realtime  = ", g_dvrstream->realtime() ? "true" : "false");
+			log_notice(__func__, ": starttime = ", g_stream_starttime, " (epoch) = ", strtok(asctime(localtime(&g_stream_starttime)), "\n"), " (local)");
+			log_notice(__func__, ": endtime   = ", g_stream_endtime, " (epoch) = ", strtok(asctime(localtime(&g_stream_endtime)), "\n"), " (local)");
 		}
 
-		catch(...) { g_scheduler.resume(); throw; }
+		catch(...) { g_dvrstream.reset(); g_scheduler.resume(); throw; }
 
 		return true;
 	}
@@ -3832,6 +3892,10 @@ bool OpenRecordedStream(PVR_RECORDING const& recording)
 
 void CloseRecordedStream(void)
 {
+	// Opening the stream in GetRecordingStreamProperties has a side effect in that while the
+	// stream is already open, Kodi will still always call CloseRecordedStream() before OpenRecordedStream()
+	if(g_stream_close_hack) { g_stream_close_hack = false; return; }
+
 	try {
 
 		// Create a copy of the current addon settings structure
@@ -3873,11 +3937,41 @@ void CloseRecordedStream(void)
 
 int ReadRecordedStream(unsigned char* buffer, unsigned int size)
 {
-	// NOTE: This disobeys the API and returns 0 instead of -1 on an error/exception.
-	// Returning -1 does not appear to be sufficient to stop Kodi from calling this again
-	try { return (g_dvrstream) ? static_cast<int>(g_dvrstream->read(buffer, size)) : 0; }
-	catch(std::exception& ex) { return handle_stdexception(__func__, ex, 0); }
-	catch(...) { return handle_generalexception(__func__, 0); }
+	assert(g_addon);
+
+	if(!g_dvrstream) return -1;
+
+	try { 
+	
+		// Attempt to read the requested number of bytes from the stream
+		int result = static_cast<int>(g_dvrstream->read(buffer, size));
+
+		// Recorded streams may be real-time if they were in progress when started, but it
+		// is still normal for them to end at some point and return no data.  If no data was 
+		// read from a real-time stream and the current system clock is before the expected 
+		// end time of that stream, log a zero-length read error
+		if(result == 0) {
+
+			time_t now = time(nullptr);
+			if((g_dvrstream->realtime()) && (now < g_stream_endtime)) log_error(__func__, ": zero-length read on stream at position ", g_dvrstream->position());
+		}
+
+		return result;
+	}
+
+	catch(std::exception& ex) {
+
+		// Log the exception and alert the user of the failure with an error notification
+		log_error(__func__, ": read operation failed with exception: ", ex.what());
+		g_addon->QueueNotification(ADDON::queue_msg_t::QUEUE_ERROR, "Unable to read from stream: %s", ex.what());
+
+		// Kodi is going to continue to call this function until it thinks the stream has ended so
+		// consume whatever data is left in the stream buffer until it returns zero enough times to stop
+		try { return static_cast<int>(g_dvrstream->read(buffer, size)); }
+		catch(...) { return 0; }
+	}
+
+	catch(...) { return handle_generalexception(__func__, -1); }
 }
 
 //---------------------------------------------------------------------------
@@ -3892,8 +3986,19 @@ int ReadRecordedStream(unsigned char* buffer, unsigned int size)
 
 long long SeekRecordedStream(long long position, int whence)
 {
+	assert(g_addon);
+
 	try { return (g_dvrstream) ? g_dvrstream->seek(position, whence) : -1; }
-	catch(std::exception& ex) { return handle_stdexception(__func__, ex, -1); }
+
+	catch(std::exception& ex) {
+
+		// Log the exception and alert the user of the failure with an error notification
+		log_error(__func__, ": seek operation failed with exception: ", ex.what());
+		g_addon->QueueNotification(ADDON::queue_msg_t::QUEUE_ERROR, "Unable to seek stream: %s", ex.what());
+
+		return -1;
+	}
+
 	catch(...) { return handle_generalexception(__func__, -1); }
 }
 
@@ -4208,11 +4313,20 @@ PVR_ERROR GetStreamTimes(PVR_STREAM_TIMES* times)
 	// Block this function for non-seekable streams otherwise Kodi will allow those operations
 	if((!g_dvrstream) || (!g_dvrstream->canseek())) return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
 
-	times->startTime = g_stream_starttime;			// Actual start time (wall clock UTC)
+	// SPECIAL CASE: If start time and end time are the same, and this is a fixed-length stream also 
+	// let Kodi handle it - it can figure this out from the stream data. This can happen if the duration 
+	// of a recorded stream was not reported properly for some reason (credit: timecutter)
+	if((g_stream_starttime == g_stream_endtime) && (g_dvrstream->realtime() == false)) return PVR_ERROR::PVR_ERROR_NOT_IMPLEMENTED;
+
+	// Set the start time to the actual start time (UTC) for realtime streams, otherwise zero
+	// Using zero here is required to enable calls to SetRecordingLastPlayedPosition()
+	times->startTime = (g_dvrstream->realtime()) ? g_stream_starttime : 0;
+
 	times->ptsStart = 0;							// Starting PTS gets set to zero
 	times->ptsBegin = 0;							// Timeshift buffer start PTS also gets set to zero
 
-	// Set the timeshift buffer end time to the lesser of the current wall clock time or the stream end time
+	// Set the timeshift duration to the delta between the start time and the lesser of the 
+	// current wall clock time or the known stream end time
 	time_t now = time(nullptr);
 	times->ptsEnd = static_cast<int64_t>(((now < g_stream_endtime) ? now : g_stream_endtime) - g_stream_starttime) * DVD_TIME_BASE;
 

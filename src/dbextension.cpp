@@ -1,5 +1,5 @@
 //---------------------------------------------------------------------------
-// Copyright (c) 2017 Michael G. Brehm
+// Copyright (c) 2016-2019 Michael G. Brehm
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -27,12 +27,14 @@
 // libcurl
 //
 #define CURL_STATICLIB
-#include <curl.h>
+#include <curl/curl.h>
 
 // sqlite extension
 //
 #include <sqlite3ext.h>
 SQLITE_EXTENSION_INIT1
+
+#pragma warning(push, 4)
 
 // FUNCTION PROTOTYPES
 //
@@ -46,7 +48,6 @@ void get_season_number(sqlite3_context* context, int argc, sqlite3_value** argv)
 void http_request(sqlite3_context* context, int argc, sqlite3_value** argv);
 void url_encode(sqlite3_context* context, int argc, sqlite3_value** argv);
 
-#pragma warning(push, 4)
 
 //---------------------------------------------------------------------------
 // sqlite3_extension_init

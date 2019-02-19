@@ -1,5 +1,5 @@
 //---------------------------------------------------------------------------
-// Copyright (c) 2017 Michael G. Brehm
+// Copyright (c) 2016-2019 Michael G. Brehm
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -74,7 +74,7 @@
 // libcurl Declarations
 
 #define CURL_STATICLIB				// Using libcurl in a static library
-#include <curl.h>					// Include CURL declarations
+#include <curl/curl.h>				// Include CURL declarations
 
 //---------------------------------------------------------------------------
 

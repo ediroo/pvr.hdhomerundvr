@@ -88,6 +88,7 @@ LOCAL_SRC_FILES := \
 	depends/libhdhomerun/hdhomerun_video.c \
 	depends/sqlite/sqlite3.c \
 	src/addoncallbacks.cpp \
+	src/curlshare.cpp \
 	src/database.cpp \
 	src/dbextension.cpp \
 	src/guicallbacks.cpp \

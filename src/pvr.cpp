@@ -490,7 +490,7 @@ static int delete_expired_enum_to_seconds(int nvalue)
 	};
 
 	return -1;						// Never = default
-};
+}
 
 // discover_devices_task
 //
@@ -893,7 +893,7 @@ static int interval_enum_to_seconds(int nvalue)
 	};
 
 	return 600;						// 10 minutes = default
-};
+}
 	
 // log_debug
 //

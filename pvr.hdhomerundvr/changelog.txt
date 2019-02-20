@@ -2,6 +2,16 @@ v1.1.2 (2019.02.xx)
   - Update SQLite database engine to version 3.27.1
   - Update cURL library to version 7.64.0
   - Update libhdhomerun library to version 2018.10.27
+  - Backport: Adapt to new backend discovery URLs (api.hdhomerun.com) (v1.2.1)
+  - Backport: Fix EPG update being aborted prematurely when requesting guide data from the past (v1.2.2)
+  - Backport: Fix bug causing stale Timers to appear in Kodi if a series with a valid recording rule has no episode information on the backend (v1.2.8)
+  - Backport: Correct format of SessionID passed to HDHomeRun RECORD engine for Live TV streams (v1.2.9)
+  - Backport: (Windows) Build HTTP-only cURL from source instead of using prebuilt static library (v1.2.9)
+  - Backport: (Linux/Android/OSX) Switch to HTTP-only prebuilt libcurl static library (v1.2.9)
+  - Backport: Add User-Agent string to all HTTP requests in order to identify the PVR client to the backend services (v1.2.9)
+  - Backport: Apply standard URL encoding to device authorization code(s) when querying the backend services (v1.2.10)
+  - Backport: Improve performance of backend service discoveries with a cURL shared DNS lookup and HTTP connection cache implementation (v1.2.10)
+  - Backport: Fix bug causing internal exception when trying to poke the HDHomeRun RECORD engine after deleting a recording rule (v1.3.5)
 
 v1.1.1 (2017.07.07)
   - Allow for 30-second and 1-minute local network discovery intervals (devices, lineups, recordings)

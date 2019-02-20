@@ -324,7 +324,7 @@
     <DownloadFile Condition="!Exists('tmp\$(KodiApk-android-aarch64).apk')" Uri="http://mirrors.kodi.tv/releases/android/arm64-v8a/$(KodiApk-android-aarch64).apk" Output="tmp\$(KodiApk-android-aarch64).apk"/>
 
     <!-- android-arm -->
-    <Exec Command="(set ANDROID_AAPT_IGNORE=&quot;&quot;) &amp; &quot;$(JAVA_HOME)\bin\java&quot; -jar -Duser.language-en depends\apktool\$(ApkToolJar) d -p out\$(KodiApk-android-arm)-framework -s tmp\$(KodiApk-android-arm).apk -o out\$(KodiApk-android-arm)" ContinueOnError="false"/>
+    <Exec Command="(set ANDROID_AAPT_IGNORE=&quot;&quot;) &amp; &quot;$(JAVA_HOME)\bin\java&quot; -jar -Duser.language-en depends\apktool\$(ApkToolJar) d -p out\$(KodiApk-android-arm)-framework -s tmp\$(KodiApk-android-arm).apk -o out\$(KodiApk-android-arm) -f" ContinueOnError="false"/>
     <ReplaceInFile filename="out\$(KodiApk-android-arm)\apktool.yml" match="versionCode:\s*'\d*'" replacewith="versionCode: '$(ApkVersionCode)'"/>
     <ReplaceInFile filename="out\$(KodiApk-android-arm)\apktool.yml" match="versionName:\s*'.*'" replacewith="versionName: '$(ApkVersionName)'" />
     <Exec Command="PowerShell Expand-Archive -Path $(PackageFile-android-arm) -DestinationPath out\$(KodiApk-android-arm)\assets\addons\" ContinueOnError="false"/>
@@ -334,7 +334,7 @@
     <Exec Command="&quot;$(ApkSignerExe)&quot; sign --ks $(Keystore) --ks-pass pass:$(KeystorePassword) --out out\$(ZukiApk-android-arm).apk out\$(KodiApk-android-arm)\dist\$(KodiApk-android-arm)-aligned.apk" ContinueOnError="false"/>
 
     <!-- android-aarch64 -->
-    <Exec Command="(set ANDROID_AAPT_IGNORE=&quot;&quot;) &amp; &quot;$(JAVA_HOME)\bin\java&quot; -jar -Duser.language-en depends\apktool\$(ApkToolJar) d -p out\$(KodiApk-android-aarch64)-framework -s tmp\$(KodiApk-android-aarch64).apk -o out\$(KodiApk-android-aarch64)" ContinueOnError="false"/>
+    <Exec Command="(set ANDROID_AAPT_IGNORE=&quot;&quot;) &amp; &quot;$(JAVA_HOME)\bin\java&quot; -jar -Duser.language-en depends\apktool\$(ApkToolJar) d -p out\$(KodiApk-android-aarch64)-framework -s tmp\$(KodiApk-android-aarch64).apk -o out\$(KodiApk-android-aarch64) -f" ContinueOnError="false"/>
     <ReplaceInFile filename="out\$(KodiApk-android-aarch64)\apktool.yml" match="versionCode:\s*'\d*'" replacewith="versionCode: '$(ApkVersionCode)'"/>
     <ReplaceInFile filename="out\$(KodiApk-android-aarch64)\apktool.yml" match="versionName:\s*'.*'" replacewith="versionName: '$(ApkVersionName)'" />
     <Exec Command="PowerShell Expand-Archive -Path $(PackageFile-android-aarch64) -DestinationPath out\$(KodiApk-android-aarch64)\assets\addons\" ContinueOnError="false"/>
